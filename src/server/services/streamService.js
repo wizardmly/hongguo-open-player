@@ -23,6 +23,7 @@ class StreamService {
     // 正在下载解密中的 Promise 映射，避免并发 Range 请求重复下载
     this.inFlight = new Map();
     this.prefetchTimers = new Map();
+    this.prefetchTargets = new Set();
     this.queue = [];
     this.activeJob = null;
     this.maxPending = 8;
@@ -258,6 +259,7 @@ class StreamService {
   runNext() {
     if (this.activeJob) return;
     this.queue.sort((a, b) => Number(a.background) - Number(b.background));
+    if (this.activeStreams && this.queue[0]?.background) return;
     const job = this.queue.shift();
     if (!job) return;
     if (job.controller.signal.aborted) {
@@ -288,6 +290,7 @@ class StreamService {
     const decrypted = variant.codec === 'bytevc2'
       ? await this.transcode(buffer, key, signal)
       : decryptMp4Buffer(buffer, key);
+    signal.throwIfAborted();
     logger.info('StreamService', `[Decrypt] 全集视频${variant.codec === 'bytevc2' ? '转码' : '解密'}完成: vid=${vid}, 输入=${buffer.length} 字节, 输出=${decrypted.length} 字节, 耗时=${Date.now() - tDecrypt}ms, 总耗时=${Date.now() - t0}ms`);
     this.cache.set(`${vid}:${quality}`, { buffer: decrypted, size: decrypted.length });
     this.pruneCache();
@@ -298,8 +301,8 @@ class StreamService {
     for (const waiter of [...this.waitingStreams]) waiter.finish(false);
     for (const timer of this.prefetchTimers.values()) clearTimeout(timer);
     this.prefetchTimers.clear();
+    this.prefetchTargets.clear();
     for (const job of this.inFlight.values()) job.controller.abort(new Error('Player stopped'));
-    this.planPrefetch?.abort();
     for (const controller of this.streamControllers) controller.abort(new Error('Player stopped'));
     this.cache.clear();
     this.fragmentCache.clear();
@@ -309,40 +312,47 @@ class StreamService {
   }
 
   /**
-   * 预加载下一集 (Prefetch)
+   * 按播放顺序下载并解密后续三集，复用前台播放队列和内存缓存。
    */
-  prefetch(vid, quality = 'auto', metadataOnly = false, minValidityMs = 0, nextVids = []) {
-    if (!vid || !/^\d{1,30}$/.test(String(vid))) return;
-    const key = `${vid}:${quality}`;
-    if (metadataOnly && this.plans.get(key)?.expires > Date.now() + minValidityMs) return;
-    if (this.cache.has(key) || this.inFlight.has(key) || this.prefetchTimers.has(key)) return;
-    // Range and HEAD probes must not create a timer for every browser request.
-    if (this.prefetchTimers.size >= 2) {
-      const oldest = this.prefetchTimers.keys().next().value;
-      clearTimeout(this.prefetchTimers.get(oldest));
-      this.prefetchTimers.delete(oldest);
-    }
-    const timer = setTimeout(() => {
-      this.prefetchTimers.delete(key);
-      if (this.activeStreams || (this.activeJob && !this.activeJob.background)) return;
-      if (metadataOnly) {
-        const controller = new AbortController();
-        this.planPrefetch = controller;
-        this.getStreamingPlan(String(vid), quality, controller.signal, minValidityMs, nextVids).then(() => {
-          logger.info('StreamService', `[Prefetch] 成功预热下一集流分片元数据: vid=${vid}`);
-        }).catch(error => {
-          if (!controller.signal.aborted) logger.warn('StreamService', `[Prefetch] 下一集元数据预热失败: ${error.message}`);
-        }).finally(() => { if (this.planPrefetch === controller) this.planPrefetch = null; });
-        return;
+  prefetch(vid, quality = 'auto', nextVids = []) {
+    quality = normalizeDownloadQuality(quality);
+    const vids = [...new Set([vid, ...nextVids].map(String))]
+      .filter(value => /^\d{1,30}$/.test(value)).slice(0, 3);
+    const targets = new Set(vids.map(value => `${value}:${quality}`));
+    this.prefetchTargets = targets;
+    for (const [key, timer] of this.prefetchTimers) {
+      if (!targets.has(key)) {
+        clearTimeout(timer);
+        this.prefetchTimers.delete(key);
       }
-      this.getDecryptedBuffer(vid, quality, { background: true }).then(() => {
-        logger.info('StreamService', `[Prefetch] 成功后台预解密下一集视频: vid=${vid}`);
-      }).catch(err => {
-        logger.warn('StreamService', `[Prefetch] 预加载分集 ${vid} 失败: ${err.message}`);
-      });
-    }, 4000);
-    timer.unref?.();
-    this.prefetchTimers.set(key, timer);
+    }
+    for (const job of this.inFlight.values()) {
+      if (job.background && !targets.has(job.key)) job.controller.abort(new Error('Prefetch superseded'));
+    }
+    for (const value of vids) {
+      const key = `${value}:${quality}`;
+      if (this.cache.has(key) || this.inFlight.has(key) || this.prefetchTimers.has(key)) continue;
+      const start = () => {
+        this.prefetchTimers.delete(key);
+        if (!this.prefetchTargets.has(key)) return;
+        // 当前集仍在取流时稍后重试，避免丢掉整次预加载。
+        if (this.activeStreams || (this.activeJob && !this.activeJob.background)) {
+          schedule(1000);
+          return;
+        }
+        this.getDecryptedBuffer(value, quality, { background: true }).then(() => {
+          logger.info('StreamService', `[Prefetch] 后台预解密完成: vid=${value}`);
+        }).catch(error => {
+          logger.warn('StreamService', `[Prefetch] 预加载分集 ${value} 失败: ${error.message}`);
+        });
+      };
+      const schedule = delay => {
+        const timer = setTimeout(start, delay);
+        timer.unref?.();
+        this.prefetchTimers.set(key, timer);
+      };
+      schedule(4000);
+    }
   }
 
   /**
@@ -351,7 +361,9 @@ class StreamService {
   pruneCache() {
     let bytes = [...this.cache.values()].reduce((sum, entry) => sum + entry.size, 0);
     while (this.cache.size > this.maxCacheCount || bytes > this.maxCacheBytes) {
-      const oldestKey = this.cache.keys().next().value;
+      const keys = [...this.cache.keys()];
+      const oldestKey = keys.find(key => !this.prefetchTargets.has(key))
+        || [...this.prefetchTargets].reverse().find(key => this.cache.has(key));
       bytes -= this.cache.get(oldestKey).size;
       this.cache.delete(oldestKey);
     }
@@ -432,6 +444,7 @@ class StreamService {
     while (this.activeStreams < 3 && this.waitingStreams.length) {
       this.waitingStreams[0].finish(true);
     }
+    this.runNext();
   }
 
   async handleStream(req, res, vid) {
@@ -441,7 +454,6 @@ class StreamService {
       return;
     }
     if (res.destroyed) { this.releaseStreamSlot(); return; }
-    this.planPrefetch?.abort();
     const controller = new AbortController();
     this.streamControllers.add(controller);
     const disconnected = () => { if (!res.writableEnded) controller.abort(new Error('Playback disconnected')); };
@@ -460,6 +472,7 @@ class StreamService {
         this.cache.delete(planKey);
         this.fragmentCache.delete(planKey);
         this.cache.delete(String(vid));
+        this.inFlight.get(planKey)?.controller.abort(new Error('Playback refreshed'));
         this.quickAborts.delete(planKey);
         appSource.clearEntryCache?.(vid);
         logger.info('StreamService', `收到单次有效刷新指令，已清空播放计划与模型缓存: vid=${vid}, token=${refreshToken}`);
@@ -481,8 +494,12 @@ class StreamService {
     }
     try {
       logger.info('StreamService', `收到流媒体Range请求: vid=${vid}, Range=${req.headers.range || '全量'}, quality=${quality}`);
-      if (this.cache.has(planKey) || this.cache.has(String(vid))) {
-        logger.info('StreamService', `命中完整视频内存缓存，直接进入缓冲分片播放: vid=${vid}, quality=${quality}`);
+      if (this.activeJob?.background && this.activeJob.key !== planKey) {
+        this.activeJob.controller.abort(new Error('Prefetch superseded'));
+      }
+      const pending = this.inFlight.get(planKey);
+      if (this.cache.has(planKey) || this.cache.has(String(vid)) || (pending && !pending.controller.signal.aborted)) {
+        logger.info('StreamService', `复用视频缓存或正在解密的任务: vid=${vid}, quality=${quality}`);
         return await this.handleBufferedStream(req, res, vid);
       }
       const cachedFragment = this.fragmentCache.get(planKey);
@@ -535,6 +552,7 @@ class StreamService {
           logger.info('StreamService', `[ByteVC2] 分片转换完成: vid=${vid}, 输出=${size} 字节, 耗时=${Date.now() - started}ms`);
         }
         await pipeline(Readable.from(collectFragments(), { objectMode: false }), res);
+        this.prefetch(req.query?.next_vid, quality, nextVids.filter(v => v !== String(req.query?.next_vid) && v !== String(vid)));
         return;
       }
       const total = plan.size;
@@ -561,7 +579,7 @@ class StreamService {
       await pipeline(Readable.from(plan.read(start, end, controller.signal), { objectMode: false, highWaterMark: 64 * 1024 }), res);
       logger.info('StreamService', `流式分片传输完成: vid=${vid}, 区间=${start}-${end}/${total}, 耗时=${Date.now() - t0}ms`);
       const followVids = nextVids.filter(v => v !== String(req.query?.next_vid) && v !== String(vid));
-      this.prefetch(req.query?.next_vid, quality, true, 0, followVids);
+      this.prefetch(req.query?.next_vid, quality, followVids);
     } catch (error) {
       const isClientAbort = controller.signal.aborted ||
         error.name === 'AbortError' ||
@@ -635,7 +653,7 @@ class StreamService {
         }
       }
       const followVids = nextVids.filter(v => v !== String(req.query?.next_vid) && v !== String(vid));
-      if (req.method === 'GET' && !res.destroyed) this.prefetch(req.query?.next_vid, req.query?.quality || 'auto', false, 0, followVids);
+      if (req.method === 'GET' && !res.destroyed) this.prefetch(req.query?.next_vid, req.query?.quality || 'auto', followVids);
       const total = buffer.length;
       const range = req.headers.range;
 

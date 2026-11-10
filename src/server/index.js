@@ -180,7 +180,7 @@ app.post('/api/prefetch/:vid', (req, res) => {
       if (/^\d{1,30}$/.test(clean) && !nextVids.includes(clean)) nextVids.push(clean);
     }
   }
-  streamService.prefetch(vid, 'auto', true, 45000, nextVids);
+  streamService.prefetch(vid, 'auto', nextVids);
   res.sendStatus(202);
 });
 

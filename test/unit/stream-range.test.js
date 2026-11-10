@@ -399,13 +399,10 @@ test('sortVariantsByCdnPriority preserves codec and resolution tier precedence w
   assert.equal(sorted[3], v4);
 });
 
-test('prefetch forwards nextVids to getStreamingPlan and handleStream passes followVids', async () => {
+test('streaming playback schedules complete prefetch for subsequent episodes', async () => {
   const service = new StreamService();
   const prefetchCalls = [];
-  const planCalls = [];
-
-  service.getStreamingPlan = async (vid, quality, signal, minValidityMs, nextVids) => {
-    planCalls.push({ vid, quality, minValidityMs, nextVids });
+  service.getStreamingPlan = async () => {
     return {
       size: 10,
       bytes: 10,
@@ -413,22 +410,7 @@ test('prefetch forwards nextVids to getStreamingPlan and handleStream passes fol
     };
   };
 
-  const originalSetTimeout = global.setTimeout;
   try {
-    global.setTimeout = fn => {
-      fn();
-      return { unref() {} };
-    };
-
-    service.prefetch('102', 'auto', true, 45000, ['103', '104']);
-    assert.equal(planCalls.length, 1);
-    assert.deepEqual(planCalls[0], {
-      vid: '102',
-      quality: 'auto',
-      minValidityMs: 45000,
-      nextVids: ['103', '104']
-    });
-
     service.prefetch = (...args) => prefetchCalls.push(args);
 
     const { Writable } = require('node:stream');
@@ -440,8 +422,35 @@ test('prefetch forwards nextVids to getStreamingPlan and handleStream passes fol
     }, res, '101');
 
     assert.equal(prefetchCalls.length, 1);
-    assert.deepEqual(prefetchCalls[0], ['102', 'auto', true, 0, ['103', '104']]);
+    assert.deepEqual(prefetchCalls[0], ['102', 'auto', ['103', '104']]);
   } finally {
-    global.setTimeout = originalSetTimeout;
+    service.shutdown();
   }
+});
+
+test('switching to an episode being prefetched reuses its download and transcoding', async () => {
+  const service = new StreamService();
+  let complete;
+  let loads = 0;
+  service.loadBuffer = async () => {
+    loads++;
+    return new Promise(resolve => { complete = resolve; });
+  };
+  service.getStreamingPlan = () => { throw new Error('must reuse prefetch'); };
+  const prefetch = service.getDecryptedBuffer('123', 'auto', { background: true });
+  await new Promise(resolve => setImmediate(resolve));
+  const res = {
+    writeHead(status) { this.status = status; },
+    end(buffer) { this.buffer = buffer; }
+  };
+  const playback = service.handleStream({ method: 'GET', headers: {}, query: { mse: '1' } }, res, '123');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.activeJob.background, false);
+  assert.equal(service.activeJob.controller.signal.aborted, false);
+  complete(Buffer.from('ready'));
+  await Promise.all([prefetch, playback]);
+  assert.equal(loads, 1);
+  assert.equal(res.status, 200);
+  assert.equal(res.buffer.toString(), 'ready');
+  service.shutdown();
 });

@@ -72,7 +72,9 @@ createApp({
     let progressTimer = null;
     let pendingResumeSec = 0;
     let progressReady = false;
-    let lastNearEndPrefetch = 0;
+    let lastEpisodePrefetch = 0;
+    let playbackPausedAt = 0;
+    let resumeRecoveryPending = false;
     let theaterRequest = 0;
     let catalogScrollTop = 0;
     let fullscreenExitAt = 0;
@@ -1293,7 +1295,9 @@ createApp({
       bytevc2Session = null;
       bytevc2Fallback = null;
       bytevc2FallbackActive = false;
-      lastNearEndPrefetch = 0;
+      lastEpisodePrefetch = 0;
+      playbackPausedAt = 0;
+      resumeRecoveryPending = false;
       stopDanmakuAnimation();
       progressReady = false;
       pendingResumeSec = 0;
@@ -1548,12 +1552,15 @@ createApp({
 
     function onPlay(event) {
       if (event && event.target !== videoEl.value) return;
+      resumeRecoveryPending = playbackPausedAt > 0 && Date.now() - playbackPausedAt >= 90000;
+      playbackPausedAt = 0;
       isPlaying.value = true;
       loadDanmaku();
       startDanmakuAnimation();
       markWatched(activeEpisodeIndex.value);
       if (navigator.mediaSession) navigator.mediaSession.playbackState = 'playing';
       isBuffering.value = false;
+      prefetchUpcomingEpisodes();
       reportClientLog('INFO', `播放器起播: 《${activeSeries.value?.series_title || ''}》 第 ${activeEpisodeIndex.value} 集`);
       resetControlsTimer();
     }
@@ -1561,11 +1568,13 @@ createApp({
     function onCanPlay(event) {
       if (event && event.target !== videoEl.value) return;
       isBuffering.value = false;
+      resumeRecoveryPending = false;
     }
 
     function onPause(event) {
       if (event && event.target !== videoEl.value) return;
       isPlaying.value = false;
+      if (progressReady) playbackPausedAt = Date.now();
       if (navigator.mediaSession) navigator.mediaSession.playbackState = 'paused';
       saveProgressNow();
       setControlsHidden(false);
@@ -1595,25 +1604,22 @@ createApp({
       }
     }
 
+    function prefetchUpcomingEpisodes() {
+      if (!isPlaying.value || (lastEpisodePrefetch && Date.now() - lastEpisodePrefetch < 20000)) return;
+      const vids = [1, 2, 3].map(offset => activeEpisodes.value
+        .find(ep => ep.vid_index === activeEpisodeIndex.value + offset)?.vid).filter(Boolean);
+      if (!vids.length) return;
+      lastEpisodePrefetch = Date.now();
+      const query = vids.length > 1 ? `?next_vids=${encodeURIComponent(vids.slice(1).join(','))}` : '';
+      fetch(`/api/prefetch/${encodeURIComponent(vids[0])}${query}`, { method: 'POST' }).catch(() => {});
+    }
+
     function onTimeUpdate(event) {
       if (isScrubbing.value) return;
       if (event && event.target !== videoEl.value) return;
       if (videoEl.value) {
         currentTime.value = videoEl.value.currentTime || 0;
-        const rate = Number(videoEl.value.playbackRate) || 1;
-        const remaining = (duration.value - currentTime.value) / rate;
-        if (isPlaying.value && Number.isFinite(remaining) && remaining > 0 && remaining <= 45 && Date.now() - lastNearEndPrefetch >= 20000) {
-          const next = activeEpisodes.value.find(ep => ep.vid_index === activeEpisodeIndex.value + 1);
-          if (next?.vid) {
-            lastNearEndPrefetch = Date.now();
-            const next2 = activeEpisodes.value.find(ep => ep.vid_index === activeEpisodeIndex.value + 2);
-            const next3 = activeEpisodes.value.find(ep => ep.vid_index === activeEpisodeIndex.value + 3);
-            const next4 = activeEpisodes.value.find(ep => ep.vid_index === activeEpisodeIndex.value + 4);
-            const followVids = [next2?.vid, next3?.vid, next4?.vid].filter(Boolean);
-            const query = followVids.length ? `?next_vids=${encodeURIComponent(followVids.join(','))}` : '';
-            fetch(`/api/prefetch/${encodeURIComponent(next.vid)}${query}`, { method: 'POST' }).catch(() => {});
-          }
-        }
+        prefetchUpcomingEpisodes();
         // 计算缓冲进度
         if (videoEl.value.buffered.length > 0 && duration.value > 0) {
           const bufferedEnd = videoEl.value.buffered.end(videoEl.value.buffered.length - 1);
@@ -1629,11 +1635,17 @@ createApp({
     }
 
     async function onVideoError(e) {
-      isBuffering.value = false;
       if (e?.target && e.target !== videoEl.value) return;
+      isBuffering.value = false;
       if (bytevc2Session && bytevc2Fallback) { bytevc2Fallback(); return; }
       const code = videoEl.value?.error?.code;
       const message = videoEl.value?.error?.message || '';
+      if (resumeRecoveryPending && (code === 2 || code === 4)) {
+        resumeRecoveryPending = false;
+        reportClientLog('INFO', '长时间暂停后取流失败，自动刷新本集并恢复播放位置');
+        await retryCurrentEpisode();
+        return;
+      }
       if (bytevc2FallbackActive) {
         reportClientLog('ERROR', `ByteVC2 完整转换播放失败: code=${code}, message=${message}`);
         videoErrorMessage.value = 'ByteVC2 视频转换或播放失败，请重试本集';
@@ -1642,8 +1654,10 @@ createApp({
       if (code !== 4) reportClientLog('ERROR', `播放器解码/渲染报错: code=${code}, message=${message}`);
       if (code === 3) {
         videoErrorMessage.value = '视频解码失败；请重试或更换分集，Windows 用户请确认已安装 HEVC 视频扩展';
-      } else if (code === 4) {
-        videoErrorMessage.value = '视频源加载或格式异常；请检查网络/代理设置，或重试切换分集';
+      } else if (code === 4 || code === 2) {
+        videoErrorMessage.value = code === 2
+          ? '视频流读取中断（网络或取流异常）；请点击“重试本集”或切换分集'
+          : '正在检查本集片源，请稍候…';
         const streamUrl = currentStreamUrl.value;
         const currentEpIndex = activeEpisodeIndex.value;
         if (streamUrl) {
@@ -1688,34 +1702,46 @@ createApp({
                 videoErrorMessage.value = '本集使用 ByteVC2 编码，当前播放器暂不支持';
               } else if (errData?.code === 'BYTEVC2_TRANSCODER_UNAVAILABLE' || errData?.code === 'BYTEVC2_TRANSCODE_FAILED') {
                 videoErrorMessage.value = errData.error || 'ByteVC2 视频转换失败，请重试';
+              } else if (['EMPTY_RESPONSE', 'BUSINESS_REJECTED', 'MISSING_MODEL'].includes(errData?.code)) {
+                videoErrorMessage.value = '片源服务暂时未返回本集播放信息，请稍后重试';
               } else if (errData?.error) {
-                videoErrorMessage.value = `${errData.error}；请检查网络或重试切换分集`;
+                videoErrorMessage.value = errData.error;
               }
             } else if (probeRes.ok && activeEpisodeIndex.value === currentEpIndex) {
+              if (currentStreamUrl.value !== streamUrl) return;
+              videoErrorMessage.value = '视频源加载或格式异常，请重试本集';
               reportClientLog('ERROR', `播放器解码/渲染报错: code=${code}, message=${message}`);
             }
           } catch (_) {
             if (activeEpisodeIndex.value === currentEpIndex && typeof navigator !== 'undefined' && navigator.onLine === false) {
               videoErrorMessage.value = '网络连接已断开，请检查网络设置后重试';
+            } else if (activeEpisodeIndex.value === currentEpIndex && currentStreamUrl.value === streamUrl) {
+              videoErrorMessage.value = '无法获取本集播放信息，请稍后重试';
             }
           }
         }
-      } else if (code === 2) {
-        videoErrorMessage.value = '视频流读取中断（网络或取流异常）；请点击“重试本集”或切换分集';
       } else {
         videoErrorMessage.value = '视频加载失败，请检查网络后重试';
       }
     }
 
-    function retryCurrentEpisode() {
+    async function retryCurrentEpisode() {
+      const video = videoEl.value;
+      pendingResumeSec = video?.currentTime || currentTime.value || pendingResumeSec;
+      progressReady = false;
+      playbackPausedAt = 0;
+      resumeRecoveryPending = false;
       bytevc2Session?.stop();
       bytevc2Session = null;
       bytevc2Fallback = null;
       bytevc2FallbackActive = false;
       videoErrorMessage.value = '';
+      isBuffering.value = true;
       streamRefreshTick.value++;
-      if (videoEl.value) {
-        videoEl.value.load();
+      const streamUrl = currentStreamUrl.value;
+      await nextTick();
+      if (videoEl.value && currentStreamUrl.value === streamUrl) {
+        if (videoEl.value === video) video.load();
         videoEl.value.play().catch(console.error);
       }
     }

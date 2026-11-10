@@ -13,7 +13,8 @@ const { normalizeDownloadQuality, meetsDownloadQuality } = require('./download-q
 const localId = () => String(1000000000000000n + BigInt('0x' + crypto.randomBytes(6).toString('hex')));
 const PROCESS_NONCE = crypto.randomBytes(18).toString('base64url');
 const PROCESS_STARTED = Date.now();
-const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
+const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/';
+const SINGLE_VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/';
 const SEARCH_API = 'https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v';
 const VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
 const PLAYBACK_UA = 'com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)';
@@ -129,14 +130,14 @@ function helios(khronos) {
 }
 
 function branchOf(url, body, khronos) { const bodyMd5 = body ? crypto.createHash('md5').update(body).digest() : Buffer.alloc(16); const q = sm3(url.split('?')[1]); const iv = getIv(getIv(getIv(0x20230928, q), bodyMd5), le32(khronos)); const low = iv & 15; return low - (((low * 171) >> 9) * 3); }
-function playbackRequest(payload, identity) {
+function playbackRequest(payload, identity, api = VIDEO_API) {
     const body = Buffer.from(payload);
     const khronos = Math.floor(Date.now() / 1000);
     const ticket = Date.now();
     let query, url;
     for (let n = 0; n < 128; n += 1) {
         query = pythonUrlEncode({ ...DEVICE, ...identity, _rticket: String(ticket + n) });
-        url = `${VIDEO_API}?${query}`;
+        url = `${api}?${query}`;
         if (branchOf(url, body, khronos) === 0) break;
         if (n === 127) throw new Error('无法生成播放请求签名');
     }
@@ -439,32 +440,43 @@ async function fetchAppPlayUrl(vid, options = {}) {
         }
     }
 
+    const bizParam = { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 };
     const payload = JSON.stringify({
-        biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
+        biz_param: bizParam,
         mixed_video_id_map: { '1004': batch },
     });
     const execRequestJson = (...args) => (module.exports.requestJson || requestJson)(...args);
-    const device = await getPlaybackDevice(execRequestJson, signal);
-    let signed = playbackRequest(payload, device);
+    let device = await getPlaybackDevice(execRequestJson, signal);
     let response;
-    try {
-        response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
-    } catch (err) {
-        signal.throwIfAborted();
-        if (err.code === 'EMPTY_RESPONSE' && typeof getPlaybackDevice.reset === 'function') {
-            logger.warn('AppSource', 'App 接口返回空响应，尝试更新播放设备并重试...');
-            getPlaybackDevice.reset(device);
-            signed = playbackRequest(payload, await getPlaybackDevice(execRequestJson, signal));
+    let single = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const signed = single
+            ? playbackRequest(JSON.stringify({ biz_param: bizParam, video_id: vid }), device, SINGLE_VIDEO_API)
+            : playbackRequest(payload, device);
+        try {
             response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
-        } else {
-            throw err;
+            if (Number(response.Code || response.code || 0) !== 0) {
+                throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
+            }
+            break;
+        } catch (error) {
+            signal.throwIfAborted();
+            if (attempt === 2 || !['EMPTY_RESPONSE', 'BUSINESS_REJECTED'].includes(error.code)) throw error;
+            if (!single) {
+                logger.warn('AppSource', '批量片源接口未返回播放信息，改用单集接口...');
+                single = true;
+            } else {
+                logger.warn('AppSource', '单集片源接口未返回播放信息，更新播放设备后重试...');
+                getPlaybackDevice.reset(device);
+                device = await getPlaybackDevice(execRequestJson, signal);
+            }
         }
     }
-    if (Number(response.Code || response.code || 0) !== 0) throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
 
-    if (response.data && typeof response.data === 'object') {
+    const entries = single && response.data?.video_model ? { [vid]: response.data } : response.data;
+    if (entries && typeof entries === 'object') {
         const now = Date.now();
-        for (const [id, entry] of Object.entries(response.data)) {
+        for (const [id, entry] of Object.entries(entries)) {
             if (entry && (entry.video_model || entry.fallback_api)) {
                 entryCache.set(id, { entry, expires: now + 180000 });
             }
@@ -474,7 +486,7 @@ async function fetchAppPlayUrl(vid, options = {}) {
         }
     }
 
-    const currentEntry = response.data?.[vid] || entryCache.get(vid)?.entry;
+    const currentEntry = entries?.[vid] || entryCache.get(vid)?.entry;
     if (!currentEntry) throw Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: 'MISSING_MODEL' });
     return await parseEntryPlayInfo(vid, currentEntry, requestedQuality, allowLowerQuality, deadline, signal, options.allowBytevc2 === true);
 }

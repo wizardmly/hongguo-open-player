@@ -1011,7 +1011,7 @@ test('onVideoError displays custom stream error when probe reports other server 
   };
 
   await state.onVideoError();
-  assert.equal(state.videoErrorMessage.value, '自定义片源解析失败；请检查网络或重试切换分集');
+  assert.equal(state.videoErrorMessage.value, '自定义片源解析失败');
 
   // Code 3 HEVC test
   state.videoEl.value = { error: { code: 3, message: 'Decode error' } };
@@ -1230,7 +1230,7 @@ test('late preference loading preserves changes made by the user', async () => {
   assert.equal(updates[0].playbackRate, '2.0');
 });
 
-test('prefetch is requested near the end using remaining playback time and includes next_vids', async () => {
+test('playing requests the next three episodes immediately and coalesces time updates', async () => {
   const calls = [];
   const state = client(async (url, options) => {
     calls.push([url, options]);
@@ -1247,14 +1247,18 @@ test('prefetch is requested near the end using remaining playback time and inclu
     return response({ success: true, items: [] });
   });
   await state.openTheater({ series_id: '123' });
-  state.videoEl.value = { currentTime: 100, playbackRate: 2, buffered: { length: 0 } };
+  state.videoEl.value = { currentTime: 0, playbackRate: 2, buffered: { length: 0 }, pause() {}, play: async () => {} };
   state.duration.value = 200;
-  state.isPlaying.value = true;
+  state.onPlay();
   state.onTimeUpdate();
-  assert.equal(calls.filter(([url]) => url.startsWith('/api/prefetch/222')).length, 0);
-  state.videoEl.value.currentTime = 112;
   state.onTimeUpdate(); state.onTimeUpdate();
-  assert.equal(calls.filter(([url, options]) => url === '/api/prefetch/222?next_vids=333%2C444%2C555' && options.method === 'POST').length, 1);
+  assert.equal(calls.filter(([url, options]) => url === '/api/prefetch/222?next_vids=333%2C444' && options.method === 'POST').length, 1);
+  state.switchEpisode({ vid_index: 2 });
+  state.onPlay();
+  assert.equal(calls.filter(([url]) => url === '/api/prefetch/333?next_vids=444%2C555').length, 1);
+  state.switchEpisode({ vid_index: 5 });
+  state.onPlay();
+  assert.equal(calls.filter(([url]) => url.startsWith('/api/prefetch/')).length, 2);
 });
 
 test('danmaku settings close on outside pointer interactions but remain open inside', () => {
@@ -1311,6 +1315,51 @@ test('retryCurrentEpisode increments streamRefreshTick and attaches refresh=1, s
   state.switchEpisode(state.activeEpisodes.value[1]);
   assert.equal(state.currentStreamUrl.value, '/api/stream/102');
   assert.ok(!state.currentStreamUrl.value.includes('refresh=1'));
+});
+
+test('retry reloads the refreshed source and restores the current playback position', async () => {
+  const state = client(async () => response({ items: [] }));
+  state.activeEpisodes.value = [{ vid: '101', vid_index: 1 }];
+  const calls = [];
+  const video = {
+    currentTime: 57, duration: 180, buffered: { length: 0 },
+    load() { calls.push(state.currentStreamUrl.value); this.currentTime = 0; },
+    play: async () => { calls.push('play'); }
+  };
+  state.videoEl.value = video;
+  state.onLoadedMetadata();
+  state.onTimeUpdate();
+  await state.retryCurrentEpisode();
+  assert.deepEqual(calls, ['/api/stream/101?refresh=1', 'play']);
+  state.onLoadedMetadata();
+  assert.equal(video.currentTime, 57);
+});
+
+test('long pause recovery refreshes once and reports an upstream failure if recovery fails', async () => {
+  let now = 1000;
+  class TestDate extends Date { static now() { return now; } }
+  const state = client(async url => url.startsWith('/api/stream/')
+    ? { ok: false, json: async () => ({ code: 'EMPTY_RESPONSE', error: 'empty upstream' }) }
+    : response({ items: [] }), { Date: TestDate });
+  state.activeEpisodes.value = [{ vid: '101', vid_index: 1 }];
+  const video = {
+    currentTime: 57, duration: 180, buffered: { length: 0 }, error: { code: 2 },
+    load() { this.currentTime = 0; }, play: async () => {}
+  };
+  state.videoEl.value = video;
+  state.onLoadedMetadata();
+  state.onTimeUpdate();
+  state.onPause();
+  now += 120000;
+  state.onPlay();
+  await state.onVideoError();
+  assert.equal(state.currentStreamUrl.value, '/api/stream/101?refresh=1');
+  assert.equal(state.isBuffering.value, true);
+  state.onLoadedMetadata();
+  assert.equal(video.currentTime, 57);
+  await state.onVideoError();
+  assert.equal(state.currentStreamUrl.value, '/api/stream/101?refresh=1');
+  assert.equal(state.videoErrorMessage.value, '片源服务暂时未返回本集播放信息，请稍后重试');
 });
 
 test('video error handler provides specific guidance for MediaError code 2 stream read failures', () => {

@@ -162,7 +162,7 @@ test('all GitHub Actions workflow files are valid YAML', async () => {
   }
 });
 
-test('near-end prefetch endpoint requires a session and validates the episode', async t => {
+test('episode prefetch endpoint requires a session and validates the episode', async t => {
   const service = require('../../src/server/services/streamService');
   const original = service.prefetch;
   const calls = [];
@@ -179,7 +179,7 @@ test('near-end prefetch endpoint requires a session and validates the episode', 
   assert.equal((await fetch(`${base}/api/prefetch/123`, options)).status, 202);
   assert.equal((await fetch(`${base}/api/prefetch/124?next_vids=125,126`, options)).status, 202);
   assert.deepEqual(calls, [
-    ['123', 'auto', true, 45000, []],
-    ['124', 'auto', true, 45000, ['125', '126']]
+    ['123', 'auto', []],
+    ['124', 'auto', ['125', '126']]
   ]);
 });

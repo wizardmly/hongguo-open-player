@@ -89,6 +89,7 @@ test('fetchAppPlayUrl batches nextVids and caches returned models in entryCache'
     if (url.includes('register')) {
       return { code: 0, device_id_str: '999', install_id_str: '888' };
     }
+    assert.equal(new URL(url).pathname, '/novel/player/multi_video_model/preload/v1/');
     requests.push({ url, body: JSON.parse(options.data) });
     return {
       code: 0,
@@ -125,24 +126,27 @@ test('fetchAppPlayUrl batches nextVids and caches returned models in entryCache'
   }
 });
 
-test('fetchAppPlayUrl retries on EMPTY_RESPONSE from upstream API', async () => {
+test('fetchAppPlayUrl falls back to the single-episode API after an empty batch response', async () => {
   const originalRequest = appSource.requestJson;
   appSource.clearEntryCache();
   let calls = 0;
 
-  appSource.requestJson = async (url) => {
+  appSource.requestJson = async (url, options) => {
     if (url.includes('register')) {
       return { code: 0, device_id_str: '999', install_id_str: '888' };
     }
     calls++;
     if (calls === 1) {
+      assert.equal(new URL(url).pathname, '/novel/player/multi_video_model/preload/v1/');
       throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
     }
+    assert.equal(new URL(url).pathname, '/novel/player/video_model/v1/');
+    const payload = JSON.parse(options.data);
+    assert.equal(payload.video_id, '20001');
+    assert.equal(payload.mixed_video_id_map, undefined);
     return {
       code: 0,
-      data: {
-        '20001': mockEntry('20001')
-      }
+      data: mockEntry('20001')
     };
   };
 
@@ -153,5 +157,42 @@ test('fetchAppPlayUrl retries on EMPTY_RESPONSE from upstream API', async () => 
   } finally {
     appSource.requestJson = originalRequest;
     appSource.clearEntryCache();
+  }
+});
+
+test('single-episode fallback retries once with a fresh device and stops after three failures', async () => {
+  const { getPlaybackDevice } = require('../../src/server/native/playback-device');
+  const originalRequest = appSource.requestJson;
+  appSource.clearEntryCache();
+  let playbackCalls = 0;
+  let registrations = 0;
+  appSource.requestJson = async url => {
+    if (url.includes('register')) {
+      registrations++;
+      return { code: 0, device_id_str: '999', install_id_str: '888' };
+    }
+    playbackCalls++;
+    if (playbackCalls === 1) return { code: 110001 };
+    if (playbackCalls === 2) throw Object.assign(new Error('empty'), { code: 'EMPTY_RESPONSE' });
+    return { code: 0, data: mockEntry('20002') };
+  };
+  try {
+    getPlaybackDevice.reset();
+    assert.equal((await appSource.fetchAppPlayUrl('20002')).url, 'https://qznovelvod.com/video_20002.mp4');
+    assert.equal(playbackCalls, 3);
+    assert.equal(registrations, 2);
+    appSource.clearEntryCache();
+    playbackCalls = 0;
+    appSource.requestJson = async url => {
+      if (url.includes('register')) return { code: 0, device_id_str: '999', install_id_str: '888' };
+      playbackCalls++;
+      throw Object.assign(new Error('empty'), { code: 'EMPTY_RESPONSE' });
+    };
+    await assert.rejects(appSource.fetchAppPlayUrl('20002'), { code: 'EMPTY_RESPONSE' });
+    assert.equal(playbackCalls, 3);
+  } finally {
+    appSource.requestJson = originalRequest;
+    appSource.clearEntryCache();
+    getPlaybackDevice.reset();
   }
 });

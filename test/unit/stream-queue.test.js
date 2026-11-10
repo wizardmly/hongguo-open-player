@@ -41,3 +41,20 @@ test('foreground playback supersedes background prefetch', async () => {
   assert.equal((await service.getDecryptedBuffer('2')).toString(), '2');
   await stopped;
 });
+
+test('queued prefetch waits for foreground streams and resumes when streaming finishes', async () => {
+  const service = new Service();
+  const started = [];
+  service.loadBuffer = async vid => { started.push(vid); return Buffer.from(vid); };
+  service.activeStreams = 1;
+  const background = service.getDecryptedBuffer('2', 'auto', { background: true });
+  await tick();
+  assert.deepEqual(started, []);
+  assert.equal((await service.getDecryptedBuffer('3')).toString(), '3');
+  await tick();
+  assert.deepEqual(started, ['3']);
+  service.releaseStreamSlot();
+  await background;
+  assert.deepEqual(started, ['3', '2']);
+  service.shutdown();
+});
