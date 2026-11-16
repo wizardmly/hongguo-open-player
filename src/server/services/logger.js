@@ -2,6 +2,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+// GUI launchers can close their inherited output pipes while the app keeps running.
+const unavailableOutputs = new WeakSet();
+for (const output of [process.stdout, process.stderr]) {
+  output.on('error', () => unavailableOutputs.add(output));
+}
+
 class Logger {
   constructor({ logDir, maxSizeBytes = 5 * 1024 * 1024, maxBackups = 3 } = {}) {
     this.maxSizeBytes = maxSizeBytes;
@@ -65,10 +71,9 @@ class Logger {
   log(level, tag, message, extra) {
     const line = this._format(level, tag, message, extra);
     // 1. 标准输出（开发环境/命令行可见）
-    if (level === 'ERROR') {
-      process.stderr.write(line);
-    } else {
-      process.stdout.write(line);
+    const output = level === 'ERROR' ? process.stderr : process.stdout;
+    if (!unavailableOutputs.has(output) && !output.destroyed) {
+      try { output.write(line); } catch (_) { unavailableOutputs.add(output); }
     }
 
     // 2. 本地日志文件持久化（排错与收集）

@@ -1,6 +1,13 @@
-const { test } = require('node:test');
+const { test, beforeEach, afterEach, mock } = require('node:test');
 const assert = require('node:assert/strict');
+const { gunzipSync } = require('node:zlib');
+const { createHash } = require('node:crypto');
 const appSource = require('../../src/server/native/app-source');
+const playbackSigner = require('../../src/server/native/playback-signer');
+const { PlayerSigner } = require('../../src/server/native/argus');
+
+beforeEach(() => mock.method(playbackSigner, 'signPlaybackRequest', async (url, body) => PlayerSigner.headers(new URL(url).search.slice(1), body)));
+afterEach(() => mock.restoreAll());
 
 function mockEntry(vid) {
   return {
@@ -89,8 +96,18 @@ test('fetchAppPlayUrl batches nextVids and caches returned models in entryCache'
     if (url.includes('register')) {
       return { code: 0, device_id_str: '999', install_id_str: '888' };
     }
-    assert.equal(new URL(url).pathname, '/novel/player/multi_video_model/preload/v1/');
-    requests.push({ url, body: JSON.parse(options.data) });
+    const parsedUrl = new URL(url);
+    assert.equal(parsedUrl.origin, 'https://reading.snssdk.com');
+    assert.equal(parsedUrl.pathname, '/novel/player/multi_video_model/player/v1');
+    assert.equal(parsedUrl.searchParams.get('version_name'), '7.4.3.32');
+    assert.equal(options.headers['Content-Encoding'], 'gzip');
+    assert.equal(options.headers['x-ss-stub'], createHash('md5').update(options.data).digest('hex').toUpperCase());
+    const argus = Buffer.from(options.headers['x-argus'], 'base64');
+    assert.equal(argus.subarray(0, 2).toString('hex'), 'f281');
+    assert.ok(argus.length > 100);
+    assert.ok(Buffer.from(options.headers['x-ladon'], 'base64').length > 4);
+    assert.ok(options.headers.Cookie.includes(`install_id=${parsedUrl.searchParams.get('iid')}`));
+    requests.push({ url, body: JSON.parse(gunzipSync(options.data)) });
     return {
       code: 0,
       data: {
@@ -105,6 +122,7 @@ test('fetchAppPlayUrl batches nextVids and caches returned models in entryCache'
     const play1 = await appSource.fetchAppPlayUrl('10001', { nextVids: ['10002', '10003', '10004', '10005'] });
     assert.equal(play1.url, 'https://qznovelvod.com/video_10001.mp4');
     assert.equal(requests.length, 1);
+    assert.equal(requests[0].body.dr_scene, 'player');
     assert.deepEqual(requests[0].body.mixed_video_id_map['1004'], ['10001', '10002', '10003', '10004']);
 
     // Calling for 10002 should hit entryCache directly without network request
@@ -137,11 +155,11 @@ test('fetchAppPlayUrl falls back to the single-episode API after an empty batch 
     }
     calls++;
     if (calls === 1) {
-      assert.equal(new URL(url).pathname, '/novel/player/multi_video_model/preload/v1/');
+      assert.equal(new URL(url).pathname, '/novel/player/multi_video_model/player/v1');
       throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
     }
     assert.equal(new URL(url).pathname, '/novel/player/video_model/v1/');
-    const payload = JSON.parse(options.data);
+    const payload = JSON.parse(gunzipSync(options.data));
     assert.equal(payload.video_id, '20001');
     assert.equal(payload.mixed_video_id_map, undefined);
     return {

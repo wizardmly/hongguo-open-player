@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-electron/
 build/bytevc2/
+build/playback-signer/
 data/*.json
 data/*.bak
 *.bak

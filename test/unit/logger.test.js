@@ -5,6 +5,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { Logger } = require('../../src/server/services/logger');
+const { spawnSync } = require('node:child_process');
+
+test('a closed console pipe does not interrupt file logging or crash the process', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hongguo-log-pipe-'));
+  try {
+    const script = `
+      const { Logger } = require(${JSON.stringify(require.resolve('../../src/server/services/logger'))});
+      const logger = new Logger({ logDir: process.argv[1] });
+      process.stdout.destroy(Object.assign(new Error('broken pipe'), { code: 'EPIPE' }));
+      setImmediate(() => logger.info('PipeTest', 'file logging continues'));
+    `;
+    const child = spawnSync(process.execPath, ['-e', script, tempDir], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(child.status, 0, child.stderr);
+    assert.match(fs.readFileSync(path.join(tempDir, 'app.log'), 'utf8'), /file logging continues/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test('logger formats, appends, rotates, and reads recent logs', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hongguo-log-test-'));

@@ -73,7 +73,7 @@ async function runTests() {
 
     // 4. 验证全部分集列表获取
     console.log('▶ [4/8] 验证剧集全集拉取 (GET /api/series/:seriesId)...');
-    const seriesId = targetDrama.series_id || '7696091370296970265';
+    const seriesId = process.env.HONGGUO_E2E_SERIES_ID || targetDrama.series_id || '7696091370296970265';
     const seriesRes = await client.get(`${BASE_URL}/api/series/${seriesId}`);
     assert.strictEqual(seriesRes.status, 200);
     const seriesData = seriesRes.data;
@@ -253,6 +253,7 @@ async function runTests() {
     }
     process.exitCode = 1;
   } finally {
+    await require('../src/server/native/playback-signer').shutdownPlaybackSigner();
     if (serverInstance) {
       serverInstance.close();
       serverInstance.closeAllConnections?.();

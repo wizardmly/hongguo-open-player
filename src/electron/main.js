@@ -315,8 +315,9 @@ if (!gotTheLock) {
       mainWindow = null;
     }
     require('../server/services/streamService').shutdown();
+    const signingStopped = require('../server/native/playback-signer').shutdownPlaybackSigner();
     serverInstance.close();
     serverInstance.closeAllConnections?.();
-    require('../server/services/storeService').pending.catch(console.error).finally(() => app.quit());
+    Promise.allSettled([require('../server/services/storeService').pending, signingStopped]).finally(() => app.quit());
   });
 }
