@@ -495,7 +495,7 @@
               type="button"
               class="sidebar-view-tab" 
               :class="{ active: sidebarTab === 'seasons' }"
-              @click="sidebarTab = 'seasons'"
+              @click="sidebarTab = 'seasons'; fetchRelatedSeasons(activeSeries, { refresh: true })"
             >
               <span>📚 系列全季 ({{ relatedSeasons.length }})</span>
             </button>

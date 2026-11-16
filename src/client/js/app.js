@@ -1147,13 +1147,23 @@ createApp({
         .replace(/\s+/g, '');
     }
 
-    async function fetchRelatedSeasons(series) {
+    function chineseSeasonNumber(number) {
+      const digits = '零一二三四五六七八九';
+      if (number < 10) return digits[number];
+      if (number === 100) return '一百';
+      const tens = Math.floor(number / 10);
+      const ones = number % 10;
+      return `${tens > 1 ? digits[tens] : ''}十${ones ? digits[ones] : ''}`;
+    }
+
+    async function fetchRelatedSeasons(series, { refresh = false } = {}) {
+      const requestId = ++currentSeasonsRequest;
       if (!series || !series.series_title) {
         relatedSeasons.value = [];
         seriesBaseTitle.value = '';
+        isCheckingSeasons.value = false;
         return;
       }
-      const requestId = ++currentSeasonsRequest;
       const { baseTitle, seasonNum, seasonLabel, isExplicit } = parseSeasonInfo(series.series_title);
       seriesBaseTitle.value = baseTitle;
 
@@ -1169,70 +1179,71 @@ createApp({
         isExplicit
       };
 
-      const cached = seasonsCache.get(baseTitle);
-      if (cached && Array.isArray(cached) && cached.length > 0) {
-        relatedSeasons.value = cached;
+      const normBase = normalizeBaseTitle(baseTitle);
+      const cached = seasonsCache.get(normBase);
+      const result = [];
+      const seenIds = new Set();
+      function addSeasons(items) {
+        for (const item of items) {
+          if (!item || !item.series_id || seenIds.has(String(item.series_id))) continue;
+          const parsed = parseSeasonInfo(item.series_title);
+          const itemNormBase = normalizeBaseTitle(parsed.baseTitle);
+          if (itemNormBase !== normBase && !(normBase.length >= 4 && itemNormBase.includes(normBase))) continue;
+          seenIds.add(String(item.series_id));
+          result.push({ ...item, total: item.total || item.episode_count, ...parsed });
+        }
+        result.sort((a, b) => a.seasonNum - b.seasonNum
+          || Number(b.isExplicit) - Number(a.isExplicit) || (b.total || 0) - (a.total || 0));
+      }
+      addSeasons([currentItem, ...(cached?.items || [])]);
+      relatedSeasons.value = [...result];
+      if (!refresh && cached?.expires > Date.now()) {
+        isCheckingSeasons.value = false;
         return;
       }
 
       isCheckingSeasons.value = true;
       try {
-        const res1 = await fetch(`/api/search?keyword=${encodeURIComponent(baseTitle)}&page=1`).then(r => r.json());
-        if (requestId !== currentSeasonsRequest) return;
-        let list = Array.isArray(res1?.results) ? [...res1.results] : [];
+        const search = async (keyword, page = 1) => {
+          const response = await fetch(`/api/search?keyword=${encodeURIComponent(keyword)}&page=${page}`);
+          const data = await response.json();
+          if (!response.ok || data?.error) throw new Error(data?.error || '系列搜索失败');
+          return data;
+        };
+        const searchedIds = new Set();
+        let complete = true;
+        for (let page = 1; page <= 50; page++) {
+          let data;
+          try { data = await search(baseTitle, page); }
+          catch (_) { complete = false; break; }
+          if (requestId !== currentSeasonsRequest) return;
+          const items = Array.isArray(data?.results) ? data.results : [];
+          const newItems = items.filter(item => !searchedIds.has(String(item.series_id)));
+          for (const item of newItems) searchedIds.add(String(item.series_id));
+          addSeasons(items);
+          relatedSeasons.value = [...result];
+          if (!data?.hasMore || !newItems.length) break;
+        }
 
-        if (res1?.hasMore && list.length >= 5) {
+        // 搜索排序会暂时漏掉中间某一季，按已知季号定向查找缺口。
+        const lastSeason = Math.max(...result.map(item => item.seasonNum));
+        const knownSeasons = new Set(result.map(item => item.seasonNum));
+        for (let number = 1; number < lastSeason; number++) {
+          if (knownSeasons.has(number)) continue;
           try {
-            const res2 = await fetch(`/api/search?keyword=${encodeURIComponent(baseTitle)}&page=2`).then(r => r.json());
-            if (requestId === currentSeasonsRequest && Array.isArray(res2?.results)) {
-              list = list.concat(res2.results);
-            }
-          } catch (_) {}
+            const data = await search(`${baseTitle}第${chineseSeasonNumber(number)}季`);
+            if (requestId !== currentSeasonsRequest) return;
+            addSeasons(Array.isArray(data?.results) ? data.results : []);
+            for (const item of result) knownSeasons.add(item.seasonNum);
+            relatedSeasons.value = [...result];
+          } catch (_) { complete = false; }
+          if (requestId !== currentSeasonsRequest) return;
         }
-        if (requestId !== currentSeasonsRequest) return;
-
-        const normBase = normalizeBaseTitle(baseTitle);
-        const seenIds = new Set();
-        const result = [];
-
-        seenIds.add(currentItem.series_id);
-        result.push(currentItem);
-
-        for (const item of list) {
-          if (!item || !item.series_id || seenIds.has(item.series_id)) continue;
-          const parsed = parseSeasonInfo(item.series_title);
-          const itemNormBase = normalizeBaseTitle(parsed.baseTitle);
-
-          if (itemNormBase === normBase || (normBase.length >= 4 && itemNormBase.includes(normBase))) {
-            seenIds.add(item.series_id);
-            result.push({
-              series_id: item.series_id,
-              series_title: item.series_title,
-              cover: item.cover,
-              total: item.total,
-              social_info: item.social_info,
-              tags: item.tags,
-              seasonNum: parsed.seasonNum,
-              seasonLabel: parsed.seasonLabel,
-              isExplicit: parsed.isExplicit
-            });
-          }
-        }
-
-        // 必须严格按季升序排好序: 1, 2, 3, ..., N
-        result.sort((a, b) => {
-          if (a.seasonNum !== b.seasonNum) return a.seasonNum - b.seasonNum;
-          if (a.isExplicit && !b.isExplicit) return -1;
-          if (!a.isExplicit && b.isExplicit) return 1;
-          return (b.total || 0) - (a.total || 0);
-        });
-
-        seasonsCache.set(baseTitle, result);
-        relatedSeasons.value = result;
+        if (complete) seasonsCache.set(normBase, { items: [...result], expires: Date.now() + 60000 });
       } catch (err) {
         if (requestId !== currentSeasonsRequest) return;
         console.warn('获取系列各季失败:', err);
-        relatedSeasons.value = [currentItem];
+        relatedSeasons.value = [...result];
       } finally {
         if (requestId === currentSeasonsRequest) {
           isCheckingSeasons.value = false;
@@ -1254,6 +1265,7 @@ createApp({
 
     function openSeasonsModal() {
       showSeasonsModal.value = true;
+      if (activeSeries.value) fetchRelatedSeasons(activeSeries.value, { refresh: true });
       if (typeof nextTick === 'function') {
         nextTick(() => {
           const modal = document?.querySelector?.('.seasons-modal');

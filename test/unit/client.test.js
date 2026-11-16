@@ -1461,6 +1461,82 @@ test('fetchRelatedSeasons retrieves all seasons, deduplicates and sorts ascendin
   }
 });
 
+test('series lookup follows short search pages and recovers a missing season by its title', async () => {
+  const item = number => ({ series_id: String(number), series_title: `测试短剧第${number}季`, episode_count: number * 10 });
+  const requested = [];
+  const state = client(async url => {
+    const query = new URL(url, 'http://localhost').searchParams;
+    requested.push([query.get('keyword'), Number(query.get('page'))]);
+    if (query.get('keyword') === '测试短剧第三季') return response({ results: [item(3), { series_id: '99', series_title: '无关短剧第三季' }] });
+    const page = Number(query.get('page'));
+    return response({ results: page === 1 ? [item(1), item(2), item(4)] : page === 2 ? [item(5)] : [item(6)], hasMore: page < 3 });
+  });
+  await state.fetchRelatedSeasons(item(1));
+  assert.deepEqual(Array.from(state.relatedSeasons.value, value => value.seasonNum), [1, 2, 3, 4, 5, 6]);
+  assert.equal(state.relatedSeasons.value[2].total, 30);
+  assert.deepEqual(requested, [['测试短剧', 1], ['测试短剧', 2], ['测试短剧', 3], ['测试短剧第三季', 1]]);
+});
+
+test('series cache expires and opening the seasons dialog checks for newly returned seasons', async () => {
+  let now = 0;
+  class Clock extends Date { static now() { return now; } }
+  let seasonCount = 1;
+  let requests = 0;
+  const series = { series_id: '1', series_title: '测试短剧' };
+  const state = client(async () => {
+    requests++;
+    return response({ results: Array.from({ length: seasonCount }, (_, i) => ({ series_id: String(i + 1), series_title: `测试短剧第${i + 1}季` })) });
+  }, { Date: Clock });
+  await state.fetchRelatedSeasons(series);
+  seasonCount = 2;
+  await state.fetchRelatedSeasons(series);
+  assert.equal(requests, 1);
+  now = 60001;
+  await state.fetchRelatedSeasons(series);
+  assert.equal(state.relatedSeasons.value.length, 2);
+  seasonCount = 3;
+  state.activeSeries.value = series;
+  state.openSeasonsModal();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.relatedSeasons.value.length, 3);
+  assert.equal(requests, 3);
+  assert.equal(state.isCheckingSeasons.value, false);
+});
+
+test('a failed search page still allows gap recovery and does not cache the incomplete check', async () => {
+  const first = { series_id: '1', series_title: '测试短剧' };
+  let retries = 0;
+  const state = client(async url => {
+    const query = new URL(url, 'http://localhost').searchParams;
+    if (query.get('keyword') === '测试短剧第二季') return response({ results: [{ series_id: '2', series_title: '测试短剧第二季' }] });
+    if (query.get('page') === '2') throw new Error('network unavailable');
+    retries++;
+    return response({ results: [first, { series_id: '3', series_title: '测试短剧第三季' }], hasMore: true });
+  });
+  await state.fetchRelatedSeasons(first);
+  assert.deepEqual(Array.from(state.relatedSeasons.value, value => value.seasonNum), [1, 2, 3]);
+  await state.fetchRelatedSeasons(first);
+  assert.equal(retries, 2);
+});
+
+test('a late missing-season response cannot replace another series', async () => {
+  let resolveGap;
+  const first = { series_id: '1', series_title: '测试短剧' };
+  const state = client(async url => {
+    const query = new URL(url, 'http://localhost').searchParams;
+    if (query.get('keyword') === '测试短剧第二季') return new Promise(resolve => { resolveGap = resolve; });
+    return response({ results: query.get('keyword') === '测试短剧' ? [first, { series_id: '3', series_title: '测试短剧第三季' }] : [] });
+  });
+  const pending = state.fetchRelatedSeasons(first);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof resolveGap, 'function');
+  await state.fetchRelatedSeasons({ series_id: '9', series_title: '另一个系列' });
+  resolveGap(response({ results: [{ series_id: '2', series_title: '测试短剧第二季' }] }));
+  await pending;
+  assert.deepEqual(Array.from(state.relatedSeasons.value, value => value.series_id), ['9']);
+  assert.equal(state.isCheckingSeasons.value, false);
+});
+
 test('selectSeason switches active drama in theater, closes modal and resets sidebar tab', async () => {
   let theaterOpenedWith = null;
   const state = client(async (url) => {
