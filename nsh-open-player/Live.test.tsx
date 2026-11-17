@@ -1,0 +1,23 @@
+import process from "process";
+import { expect, open, test } from "nsh/test";
+
+const liveTest = process.env.HONGGUO_NSH_BACKEND ? test : test.skip;
+liveTest("Windows native playback uses the real Hongguo source and preloads three episodes", async () => {
+  const app = await open("./App.tsx", { width: 1280, height: 840, network: "live" });
+  await app.waitFor("id:search-input");
+  await app.type("id:search-input", "一梦青玄，团宠小师妹一剑毁天灭地第三季");
+  await app.press("id:search-submit-btn");
+  await app.waitFor("id:drama-card-7673461357148130329", { timeout: 30000 });
+  await app.press("id:drama-card-7673461357148130329");
+  await app.waitFor("第 1 集 / 全 186 集", { timeout: 30000 });
+  await app.waitUntil(() => app.texts().some(text => /^00:0[3-9]\s*\//.test(text)), { timeout: 120000 });
+  await app.screenshot(".nsh/test/hongguo-third-season.png");
+  await app.press("id:play-pause-btn");
+  await app.waitFor("预载 3/3 集", { timeout: 120000 });
+  await app.press("id:next-episode-btn");
+  await app.waitFor("第 2 集 / 全 186 集");
+  await app.waitUntil(() => app.texts().some(text => /^00:0[3-9]\s*\//.test(text)), { timeout: 20000 });
+  await app.press("id:open-seasons-modal-btn");
+  await app.waitFor("共 9 季 · 已排好序", { timeout: 30000 });
+  expect(app.shows("共 186 集")).toBe(true);
+}, 240000);

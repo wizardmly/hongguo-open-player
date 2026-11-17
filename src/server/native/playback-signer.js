@@ -132,7 +132,13 @@ function getNativeSigner() {
 }
 
 async function signPlaybackRequest(url, body, signal) {
-    if (process.platform === 'win32' && process.arch === 'x64') return getNativeSigner().sign(url, body, signal);
+    if (process.platform === 'win32' && process.arch === 'x64') {
+        try { return await getNativeSigner().sign(url, body, signal); }
+        catch (error) {
+            if (error.code !== 'PLAYBACK_SIGNER_FAILED' || signal?.aborted) throw error;
+            return getNativeSigner().sign(url, body, signal);
+        }
+    }
     return PlayerSigner.headers(new URL(url).search.slice(1), body);
 }
 
