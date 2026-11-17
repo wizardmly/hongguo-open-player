@@ -218,6 +218,7 @@ export function TheaterView(props: TheaterViewProps) {
   effect(() => {
     const sid = props.series.series_id;
     if (sid !== initializedSeriesId) {
+      episodePreloader.clearAll();
       initializedSeriesId = sid;
       const targetIdx = props.initialEpisodeIndex;
       const ep =
@@ -705,7 +706,7 @@ export function TheaterView(props: TheaterViewProps) {
                 canAdvanceEpisode = true;
                 buffering.set(false);
                 if (Number.isFinite(e.duration) && e.duration > 0) {
-                  duration.set(e.duration);
+                  duration.set(Math.max(duration(), e.duration));
                 }
                 if (pendingResumeSec > 0.2) {
                   const target =
@@ -721,7 +722,7 @@ export function TheaterView(props: TheaterViewProps) {
                   currentTime.set(e.currentTime);
                 }
                 if (Number.isFinite(e.duration) && e.duration > 0) {
-                  duration.set(e.duration);
+                  duration.set(Math.max(duration(), e.duration));
                 }
                 if (Math.abs(e.currentTime - lastSavedSec) >= 2) {
                   lastSavedSec = e.currentTime;
@@ -741,7 +742,7 @@ export function TheaterView(props: TheaterViewProps) {
                 }
               }}
               onEnd={() => {
-                if (!canAdvanceEpisode) return;
+                if (!canAdvanceEpisode || duration() <= 0 || currentTime() < duration() - 1.5) return;
                 canAdvanceEpisode = false;
                 playNextEpisode();
               }}

@@ -19,6 +19,26 @@ function createNshBackend() {
   const preparing = new Map();
   const compatibleBuffers = new WeakSet();
   const active = new Set();
+  let useHardware = process.platform === 'win32';
+
+  async function convertHevc(buffer, signal) {
+    const started = Date.now();
+    let converted;
+    try {
+      converted = await transcodeBytevc2(buffer, Buffer.alloc(0), signal, {
+        executable: process.env.HONGGUO_NSH_FFMPEG, encoderArgs, hardware: useHardware,
+      });
+    } catch (error) {
+      if (!useHardware || signal.aborted) throw error;
+      useHardware = false;
+      logger.info('NSH', '硬件转码不可用，改用软件转码');
+      converted = await transcodeBytevc2(buffer, Buffer.alloc(0), signal, {
+        executable: process.env.HONGGUO_NSH_FFMPEG, encoderArgs,
+      });
+    }
+    logger.info('NSH', `${useHardware ? '硬件' : '软件'}转换完成: 耗时=${Date.now() - started}ms`);
+    return converted;
+  }
   app.use((req, res, next) => {
     const expectedHost = `127.0.0.1:${req.socket.localPort}`;
     if (req.headers.host !== expectedHost || req.headers.origin || req.headers['sec-fetch-site'] === 'cross-site') {
@@ -59,6 +79,7 @@ function createNshBackend() {
     const existingBuffer = streams.cache.get(key)?.buffer;
     if (existingBuffer && compatibleBuffers.has(existingBuffer)) return existingBuffer;
     let job = preparing.get(vid);
+    if (job?.controller.signal.aborted) job = null;
     if (!job) {
       const controller = new AbortController();
       job = { controller, waiters: 0 };
@@ -68,9 +89,7 @@ function createNshBackend() {
         // The existing FFmpeg path accepts clear MP4 as well as ByteVC2.
         if (buffer.includes(Buffer.from('hvc1')) || buffer.includes(Buffer.from('hev1'))) {
           try {
-            buffer = await transcodeBytevc2(buffer, Buffer.alloc(0), controller.signal, {
-              executable: process.env.HONGGUO_NSH_FFMPEG, encoderArgs,
-            });
+            buffer = await convertHevc(buffer, controller.signal);
           } catch (error) {
             if (!controller.signal.aborted) error.message = '本集视频转换失败，请重试本集';
             throw error;

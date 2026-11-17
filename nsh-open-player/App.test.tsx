@@ -58,6 +58,30 @@ describe("domain: multi-season parsing and missing-season backfill", () => {
 });
 
 describe("service: sequential 3-episode preloader and 128MB LRU cache", () => {
+  test("cancels obsolete playback before starting the selected episode", async () => {
+    const order: string[] = [];
+    let oldSignal: AbortSignal | undefined;
+    const manager = new EpisodePreloadManager({
+      loader: async (ep, signal) => {
+        order.push(ep.vid);
+        if (ep.vid_index === 1) {
+          oldSignal = signal;
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        return { resolvedUrl: ep.src, sizeBytes: 1024 };
+      },
+    });
+    const oldPlayback = manager.acquireForPlayback(makeEp(1)).catch(() => null);
+    const selected = await manager.acquireForPlayback(makeEp(6));
+    await oldPlayback;
+    expect(oldSignal?.aborted).toBe(true);
+    expect(selected.vid).toBe("ep-6");
+    expect(order).toEqual(["ep-1", "ep-6"]);
+    expect(manager.getStatus("ep-1")).toBe("idle");
+  });
+
   test("preloads upcoming 3 episodes sequentially and reuses in-flight job on switch", async () => {
     const startedOrder: string[] = [];
     const resolvers = new Map<string, () => void>();

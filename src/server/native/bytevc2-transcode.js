@@ -14,7 +14,7 @@ function binaryPath() {
 }
 
 async function transcodeBytevc2(buffer, key, signal, options = {}) {
-  const { executable = binaryPath(), encoderArgs = [] } = options;
+  const { executable = binaryPath(), encoderArgs = [], hardware = false } = options;
   signal?.throwIfAborted();
   if (!Buffer.isBuffer(key) || ![0, 16].includes(key.length)) throw new Error('ByteVC2 片源密钥无效');
   if (!key.length) assertUnencryptedMp4(buffer);
@@ -35,9 +35,13 @@ async function transcodeBytevc2(buffer, key, signal, options = {}) {
         signal?.removeEventListener('abort', abort);
         error ? reject(error) : resolve();
       };
+      const videoArgs = hardware
+        ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '25', '-b:v', '0']
+        : ['-c:v', 'libx264', '-threads', '2', '-preset', 'ultrafast', '-crf', '25'];
       const child = spawn(executable, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '2',
+        ...(hardware ? ['-hwaccel', 'cuda'] : []),
         ...(key.length ? ['-decryption_key', key.toString('hex')] : []),
-        '-i', input, '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-threads', '2', '-preset', 'ultrafast', '-crf', '25', ...encoderArgs,
+        '-i', input, '-map', '0:v:0', '-map', '0:a:0?', ...videoArgs, ...encoderArgs,
         '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', '-y', output],
       { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
       const abort = () => child.kill();

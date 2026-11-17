@@ -1,4 +1,4 @@
-param([string]$NshCommand = 'nsh')
+param([string]$NshCommand = 'nsh', [string]$OutputDir = 'dist/windows-integrated')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -8,9 +8,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Backend preparation failed' }
     & $NshCommand check
     if ($LASTEXITCODE -ne 0) { throw 'NSH type check failed' }
-    & $NshCommand package App.tsx --target windows --out dist/windows-integrated
+    & $NshCommand package App.tsx --target windows --out $OutputDir
     if ($LASTEXITCODE -ne 0) { throw 'NSH package failed' }
-    $application = Join-Path $projectRoot 'dist\windows-integrated\红果开源播放器'
+    $application = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $projectRoot $OutputDir) '红果开源播放器'))
     $bundledBackend = [System.IO.Path]::GetFullPath((Join-Path $application 'nsh\backend'))
     if (-not $bundledBackend.StartsWith([System.IO.Path]::GetFullPath($application) + [System.IO.Path]::DirectorySeparatorChar)) { throw 'Invalid backend directory' }
     if (Test-Path -LiteralPath $bundledBackend) { Remove-Item -LiteralPath $bundledBackend -Recurse -Force }

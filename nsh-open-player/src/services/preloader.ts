@@ -143,6 +143,14 @@ export class EpisodePreloadManager {
   /** Acquires an episode for immediate playback, reusing cache or in-flight work and preempting queued prefetches. */
   acquireForPlayback(episode: EpisodeItem): Promise<CachedEpisodeMedia> {
     this.activeVid = episode.vid;
+    for (const [vid, job] of this.inFlight) {
+      if (vid === episode.vid || (!job.started && job.priority === "prefetch")) continue;
+      job.controller.abort(new Error("Playback superseded"));
+      this.removeQueuedJob(job);
+      this.inFlight.delete(vid);
+      this.setStatus(vid, "idle");
+      if (!job.started) job.reject(job.controller.signal.reason);
+    }
     const hit = this.cache.get(episode.vid);
     if (hit) {
       hit.timestamp = Date.now();
@@ -185,6 +193,7 @@ export class EpisodePreloadManager {
         job.controller.abort(new Error("Prefetch superseded"));
         this.removeQueuedJob(job);
         this.inFlight.delete(vid);
+        if (!job.started) job.reject(job.controller.signal.reason);
         if (!this.cache.has(vid)) this.setStatus(vid, "idle");
       }
     }
@@ -270,7 +279,7 @@ export class EpisodePreloadManager {
       })
       .catch((err) => {
         if (!next.controller.signal.aborted) {
-          this.setStatus(next.episode.vid, "error");
+          if (this.inFlight.get(next.episode.vid) === next) this.setStatus(next.episode.vid, "error");
         }
         if (this.inFlight.get(next.episode.vid) === next) {
           this.inFlight.delete(next.episode.vid);
@@ -336,10 +345,13 @@ export class EpisodePreloadManager {
   clearAll(): void {
     for (const job of this.inFlight.values()) {
       job.controller.abort(new Error("Cleared"));
+      if (!job.started) job.reject(job.controller.signal.reason);
     }
     this.queue.length = 0;
     this.inFlight.clear();
     this.activeJob = null;
+    this.activeVid = null;
+    this.prefetchTargets.clear();
     for (const item of this.cache.values()) {
       this.revokeIfBlob(item.resolvedUrl);
     }
