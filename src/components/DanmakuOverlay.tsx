@@ -63,8 +63,8 @@ function rgbaString(rgb: readonly [number, number, number], alpha: number): stri
 }
 
 /**
- * Exact port of `prioritizeDanmakuItems` from `hongguo-open-player/src/client/js/app.js`:
- * assigns non-colliding tracks and replaces lower-likes blockers when high-likes priority is enabled.
+ * Schedules danmaku items onto non-colliding horizontal tracks, evicting lower-liked blockers
+ * when high-likes priority is enabled.
  */
 function scheduleDanmakuTracks(
   items: DanmakuComment[],

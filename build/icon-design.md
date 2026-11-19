@@ -7,8 +7,7 @@
 - `icon.png`：1024×1024、透明 RGBA 主图。
 - `icon.icns`：macOS 应用图标，含 16px 至 1024px 的标准分辨率。
 - `icon.ico`：Windows 图标，含 16、24、32、48、64、128、256px。
-- `../src/client/assets/app-icon.png`：256px 应用内标识及 Linux 窗口图标。
-- `../src/client/assets/favicon-32.png`：32px 网页标签图标。
+- `../assets/app-icon.png`：256×256 应用内标识与 `nsh.json` 应用图标源（`nsh package` 会据此自动派生各平台图标）。
 
 修改主图后，在装有 ImageMagick 的 macOS 环境运行 `./scripts/build-icons.sh`，重新生成平台及客户端资源。保持透明通道和四周留白，不要拉伸或添加额外的外框。
 

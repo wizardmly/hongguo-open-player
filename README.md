@@ -114,6 +114,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 
 
 ---
 
+## 📚 文档索引
+
+* [🚀 快速开始与便携包构建](docs/快速开始.md)
+* [🎨 NSH 界面规范与动效清单 (DESIGN.md)](DESIGN.md)
+* [🎮 播放器交互设计与键盘快捷键](docs/播放器交互设计.md)
+
+---
+
 ## 💡 参考项目与致敬 (Acknowledgements & References)
 
 在本项目的设计与开发过程中，参考了社区中相关优秀开源项目的实践与研究：

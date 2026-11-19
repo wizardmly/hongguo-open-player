@@ -36,7 +36,7 @@ const VERTICAL_CLIPS = [clipVertical1, clipVertical2, clipVertical3, clipVertica
 const POSTERS = [poster1, poster2, poster3, poster4, poster5, poster6];
 const AVATARS = [avatar1, avatar2, avatar3, avatar4];
 
-/** Exact hot search tags from `hongguo-open-player/src/client/js/app.js`. */
+/** Preset hot search keyword chips shown on the catalog toolbar. */
 export const HOT_SEARCH_TAGS = ["离婚", "战神", "重生", "逆袭", "神医", "千金", "豪门", "甜宠"];
 
 export interface PagedResult<T> {
