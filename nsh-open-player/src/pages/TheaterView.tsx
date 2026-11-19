@@ -5,6 +5,7 @@ import {
   effect,
   Image,
   keymap,
+  type MouseEvent,
   platform,
   type PressEvent,
   Scroll,
@@ -195,6 +196,7 @@ export function TheaterView(props: TheaterViewProps) {
   let bufferGraceTimer: ReturnType<typeof setTimeout> | undefined;
   let controlsHideTimer: ReturnType<typeof setTimeout> | undefined;
   let prepTickTimer: ReturnType<typeof setInterval> | undefined;
+  let lastMousePagePos: { x: number; y: number } | null = null;
 
   const activeVideoRef = (): VideoRef | undefined => getVideoNode(activeLayerId());
 
@@ -219,8 +221,19 @@ export function TheaterView(props: TheaterViewProps) {
         if (isFullScreen() && !paused() && !scrubbing() && !props.hasModalOpen) {
           controlsHidden.set(true);
         }
-      }, 2800);
+      }, 2500);
     }
+  };
+
+  const handleStageMouseMove = (e: MouseEvent) => {
+    const { x, y } = e.pagePosition;
+    if (lastMousePagePos) {
+      if (Math.abs(x - lastMousePagePos.x) < 2 && Math.abs(y - lastMousePagePos.y) < 2) {
+        return;
+      }
+    }
+    lastMousePagePos = { x, y };
+    wakeControls();
   };
 
   effect(() => {
@@ -228,6 +241,7 @@ export function TheaterView(props: TheaterViewProps) {
     const isPaused = paused();
     const isScrub = scrubbing();
     if (!fs || isPaused || isScrub) {
+      lastMousePagePos = null;
       controlsHidden.set(false);
       if (controlsHideTimer) {
         clearTimeout(controlsHideTimer);
@@ -1146,7 +1160,11 @@ export function TheaterView(props: TheaterViewProps) {
   };
 
   return (
-    <View onMouseMove={wakeControls} class="flex-1 flex-row bg-stage">
+    <View
+      onMouseMove={handleStageMouseMove}
+      style={isFullScreen() && controlsHidden() ? { cursor: "none" } : undefined}
+      class="flex-1 flex-row bg-stage"
+    >
       {/* Main Theater Player Column */}
       <View
         class={`relative min-w-0 flex-1 bg-stage-panel ${
@@ -1156,9 +1174,17 @@ export function TheaterView(props: TheaterViewProps) {
         {/* 52px Player Header (docked in windowed mode; auto-hiding top overlay in fullscreen) */}
         <If when={!isFullScreen() || !controlsHidden()}>
           <View
+            style={
+              isFullScreen()
+                ? {
+                    backgroundImage:
+                      "linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.35) 65%, rgba(0, 0, 0, 0) 100%)",
+                  }
+                : undefined
+            }
             class={`h-[52px] flex-row items-center justify-between gap-2 px-5 ${
               isFullScreen()
-                ? "absolute inset-x-0 top-0 z-20 bg-stage/80"
+                ? "absolute inset-x-0 top-0 z-20"
                 : "border-b border-border bg-stage-header"
             }`}
           >
@@ -1473,6 +1499,7 @@ export function TheaterView(props: TheaterViewProps) {
               opacity={props.prefs.danmakuOpacity}
               likesPriority={props.prefs.danmakuLikesPriority}
               stageWidth={stageWidth()}
+              topOffset={isFullScreen() ? 64 : 40}
             />
           </View>
 
@@ -1481,7 +1508,9 @@ export function TheaterView(props: TheaterViewProps) {
             {(msg) => (
               <View
                 style={{ zIndex: 6 }}
-                class="pointer-events-none absolute top-4 left-5 rounded-lg border border-stage-foreground/12 bg-stage/78 px-3.5 py-1.5 shadow-md"
+                class={`pointer-events-none absolute left-5 rounded-lg border border-stage-foreground/12 bg-stage/78 px-3.5 py-1.5 shadow-md ${
+                  isFullScreen() && !controlsHidden() ? "top-16" : "top-4"
+                }`}
               >
                 <Text class="text-xs font-medium text-stage-foreground">{msg()}</Text>
               </View>
@@ -1530,9 +1559,17 @@ export function TheaterView(props: TheaterViewProps) {
         {/* 84px Bottom Player Controls (docked in windowed mode; auto-hiding bottom overlay in fullscreen) */}
         <If when={!isFullScreen() || !controlsHidden()}>
           <View
+            style={
+              isFullScreen()
+                ? {
+                    backgroundImage:
+                      "linear-gradient(0deg, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.52) 65%, rgba(0, 0, 0, 0) 100%)",
+                  }
+                : undefined
+            }
             class={`relative h-[84px] justify-center px-5 pb-1.5 ${
               isFullScreen()
-                ? "absolute inset-x-0 bottom-0 z-20 bg-stage/85"
+                ? "absolute inset-x-0 bottom-0 z-20"
                 : "border-t border-border bg-surface"
             }`}
           >

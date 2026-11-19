@@ -172,6 +172,7 @@ export interface DanmakuOverlayProps {
   opacity: number;
   likesPriority: boolean;
   stageWidth: number;
+  topOffset?: number;
 }
 
 /**
@@ -340,8 +341,8 @@ export function DanmakuOverlay(props: DanmakuOverlayProps) {
   return (
     <If when={props.enabled}>
       <View
-        style={{ height: props.rows * 32, pointerEvents: "none" }}
-        class="pointer-events-none absolute inset-x-0 top-10 overflow-hidden"
+        style={{ top: props.topOffset ?? 40, height: props.rows * 32, pointerEvents: "none" }}
+        class="pointer-events-none absolute inset-x-0 overflow-hidden"
       >
         <Each of={bullets()} key={(b) => b.key}>
           {(b) => (

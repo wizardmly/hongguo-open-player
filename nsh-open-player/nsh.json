@@ -1,8 +1,8 @@
 {
   "name": "红果开源播放器",
   "id": "dev.openplayer.hongguo.nsh",
-  "version": "1.2.3",
-  "build": 7,
+  "version": "1.2.4",
+  "build": 8,
   "icon": "assets/app-icon.png",
   "theme": "theme.json",
   "appearance": "dark",
