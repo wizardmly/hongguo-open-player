@@ -160,6 +160,62 @@ describe("service: sequential 3-episode preloader and 128MB LRU cache", () => {
     expect(manager.totalCachedBytes()).toBeLessThanOrEqual(128 * 1024 * 1024);
     expect(manager.isCached("ep-6")).toBe(true);
   });
+
+  test("switching to an already-cached episode keeps in-flight next-episode prefetch uninterrupted and preserves cache on exit", async () => {
+    let ep3Signal: AbortSignal | undefined;
+    let resolveEp3!: () => void;
+
+    const manager = new EpisodePreloadManager({
+      prefetchAheadCount: 3,
+      loader: async (ep, signal) => {
+        if (ep.vid === "ep-3") {
+          ep3Signal = signal;
+          await new Promise<void>((res, rej) => {
+            resolveEp3 = res;
+            signal.addEventListener("abort", () => rej(signal.reason), { once: true });
+          });
+        }
+        return { resolvedUrl: ep.src, sizeBytes: 1024 };
+      },
+    });
+
+    const episodes = [1, 2, 3, 4].map((i) => makeEp(i, 1024));
+    await manager.acquireForPlayback(episodes[0]);
+    manager.scheduleUpcoming(episodes, 1);
+
+    // Wait until ep-2 finishes caching and ep-3 starts in-flight prefetching
+    await new Promise((r) => setTimeout(r, 15));
+    expect(manager.peekCached("ep-2")?.resolvedUrl).toBe("asset:/ep-2.mp4");
+    expect(manager.getStatus("ep-3")).toBe("loading");
+
+    // Seamless switch to already-cached ep-2 MUST NOT abort in-flight ep-3!
+    const cachedEp2 = await manager.acquireForPlayback(episodes[1]);
+    expect(cachedEp2.vid).toBe("ep-2");
+    expect(ep3Signal?.aborted).toBe(false);
+
+    // Exiting Theater cancels pending ep-3/ep-4 prefetches while keeping ep-1 & ep-2 in LRU cache!
+    manager.cancelPendingPrefetches();
+    expect(ep3Signal?.aborted).toBe(true);
+    expect(manager.isCached("ep-1")).toBe(true);
+    expect(manager.isCached("ep-2")).toBe(true);
+    resolveEp3?.();
+  });
+
+  test("transparently retries transient network error on foreground playback", async () => {
+    let attempts = 0;
+    const manager = new EpisodePreloadManager({
+      loader: async (ep) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("ECONNRESET");
+        return { resolvedUrl: ep.src, sizeBytes: 1024 };
+      },
+    });
+
+    const result = await manager.acquireForPlayback(makeEp(1, 1024));
+    expect(attempts).toBe(2);
+    expect(result.vid).toBe("ep-1");
+    expect(manager.getStatus("ep-1")).toBe("ready");
+  });
 });
 
 describe("ui: catalog, search, actor ranking, multi-season backfill and theater playback", () => {

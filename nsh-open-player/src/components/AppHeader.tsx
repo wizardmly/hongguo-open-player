@@ -1,4 +1,5 @@
 import { Image, type InputRef, openUrl, platform, signal, Text, View, windowSize } from "nsh";
+import { isAvailable as desktopWindowAvailable, titleBar } from "nsh/desktop";
 import appIcon from "../../assets/app-icon.png";
 import type { AppearanceMode, CatalogTab } from "../domain/types";
 import {
@@ -50,9 +51,20 @@ export function AppHeader(props: AppHeaderProps) {
   const historyOpen = signal(false);
   const searchFocused = signal(false);
   const isTerm = platform.idiom === "terminal";
-  const hideBrandSuffix = () => (isTerm ? windowSize().width < 95 : windowSize().width < 1080);
-  const compact = () => (isTerm ? windowSize().width < 90 : windowSize().width < 900);
+  const tb = () => (desktopWindowAvailable ? titleBar() : { height: 0, left: 0, right: 0 });
+  const hideBrandSuffix = () => (isTerm ? windowSize().width < 95 : windowSize().width < 1140);
+  const compact = () => (isTerm ? windowSize().width < 90 : windowSize().width < 940);
   const mobile = () => (isTerm ? windowSize().width < 64 : windowSize().width < 560);
+  const padLeft = () => {
+    const base = mobile() ? 12 : 20;
+    const leftInset = tb().left;
+    return leftInset > 0 ? leftInset + 12 : base;
+  };
+  const padRight = () => {
+    const base = mobile() ? 12 : 20;
+    const rightInset = tb().right;
+    return rightInset > 0 ? rightInset + 22 : base;
+  };
 
   const appearanceLabel = () =>
     props.appearance === "dark"
@@ -64,7 +76,11 @@ export function AppHeader(props: AppHeaderProps) {
   const searchExpanded = () => searchFocused() || props.searchKeyword.trim().length > 0;
 
   return (
-    <View class={`border-b border-border bg-surface/95 ${compact() ? "py-2" : "h-[60px] justify-center"} ${mobile() ? "px-3" : "px-5"}`}>
+    <View
+      desktop={{ windowDrag: true }}
+      style={isTerm ? undefined : { paddingLeft: padLeft(), paddingRight: padRight() }}
+      class={`border-b border-border bg-surface/95 ${compact() ? "py-2" : "h-[60px] justify-center"} ${isTerm ? "px-2" : ""}`}
+    >
       <View class="flex-row items-center justify-between gap-3">
         {/* Left: Brand + Category Pill Tabs */}
         <View class={mobile() ? "shrink-0 flex-row items-center" : "min-w-0 flex-1 flex-row items-center gap-3 overflow-hidden"}>
@@ -106,7 +122,7 @@ export function AppHeader(props: AppHeaderProps) {
 
         {/* Right: Pill Search Box (with anchored Recent Search dropdown) + Hamburger Menu */}
         <View class={mobile() ? "min-w-0 flex-1 flex-row items-center gap-2" : "shrink-0 flex-row items-center gap-2.5"}>
-          <View class={mobile() ? "min-w-0 flex-1" : searchExpanded() ? "w-60" : "w-48"}>
+          <View class={mobile() ? "min-w-0 flex-1" : searchExpanded() ? "w-56" : "w-44"}>
             <UiPopover
               open={historyOpen() && props.searchHistory.length > 0}
               onOpenChange={(open) => historyOpen.set(open)}

@@ -1,26 +1,50 @@
-import { createMotion, Image, platform, Text, View } from "nsh";
+import { cleanup, createMotion, Image, platform, Text, View } from "nsh";
 import type { SeriesSummary } from "../domain/types";
-import { staggerDelay, UiBadge, UiButton } from "../ui";
+import { prefetchSeriesDetail } from "../services/catalog";
+import { staggerDelay, UiBadge, UiButton, UiIconButton } from "../ui";
 
 export interface DramaCardProps {
   drama: SeriesSummary;
   watchedIndex?: number;
   index: number;
   onSelect: (drama: SeriesSummary) => void;
+  onRemove?: (seriesId: string) => void;
 }
 
-/** Poster card replicating `hongguo-open-player` `.drama-card` (3:4 cover, top-right episode badge, 2-line title & desc). */
+/** Poster card replicating `hongguo-open-player` `.drama-card` with desktop hover detail prefetching. */
 export function DramaCard(props: DramaCardProps) {
-  const entrance = createMotion({ enter: "fadeInUp", delay: staggerDelay(props.index), duration: 280 });
+  const entrance = createMotion({ enter: "fadeInUp", delay: staggerDelay(props.index), duration: 260 });
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const scheduleHoverPrefetch = () => {
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      prefetchSeriesDetail(props.drama.series_id);
+    }, 140);
+  };
+
+  const cancelHoverPrefetch = () => {
+    if (hoverTimer) {
+      clearTimeout(hoverTimer);
+      hoverTimer = undefined;
+    }
+  };
+
+  cleanup(cancelHoverPrefetch);
 
   return (
-    <View style={entrance.style} class="flex-1">
+    <View
+      style={entrance.style}
+      onMouseEnter={scheduleHoverPrefetch}
+      onMouseLeave={cancelHoverPrefetch}
+      class="group relative flex-1"
+    >
       <UiButton
         testID={`drama-card-${props.drama.series_id}`}
         variant="ghost"
         accessibilityLabel={`${props.drama.series_title}，全 ${props.drama.episode_count} 集`}
         onPress={() => props.onSelect(props.drama)}
-        class="group h-auto w-full grow flex-col items-stretch justify-start overflow-hidden rounded-[10px] border border-border bg-card p-0 transition duration-200 hover:-translate-y-1 hover:border-primary/45 hover:bg-surface-elevated"
+        class="h-auto w-full grow flex-col items-stretch justify-start overflow-hidden rounded-[10px] border border-border bg-card p-0 transition duration-200 hover:-translate-y-1 hover:border-primary/45 hover:bg-surface-elevated"
       >
         <If when={platform.idiom !== "terminal"}>
           <View class="relative w-full overflow-hidden bg-surface" style={{ aspectRatio: 3 / 4 }}>
@@ -85,6 +109,23 @@ export function DramaCard(props: DramaCardProps) {
           </If>
         </View>
       </UiButton>
+
+      {/* Optional single-item remove button in Watch History */}
+      <If when={props.onRemove}>
+        {(removeFn) => (
+          <View class="absolute top-2 left-2 z-10 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+            <UiIconButton
+              icon="close"
+              size="sm"
+              variant="stage"
+              accessibilityLabel={`移除历史记录：${props.drama.series_title}`}
+              tooltip="从观影历史移除"
+              onPress={() => removeFn()(props.drama.series_id)}
+              class="size-6 rounded-full bg-stage/80"
+            />
+          </View>
+        )}
+      </If>
     </View>
   );
 }

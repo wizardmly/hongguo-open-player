@@ -1,4 +1,4 @@
-import { signal } from "nsh";
+import { platform, signal } from "nsh";
 import type { EpisodeItem, PreloadStatus } from "../domain/types";
 import { prepareHongguoEpisode } from "./backend";
 
@@ -14,7 +14,15 @@ export interface PreloadLoaderResult {
   sizeBytes: number;
 }
 
-export type EpisodeMediaLoader = (episode: EpisodeItem, signal: AbortSignal) => Promise<PreloadLoaderResult>;
+export interface EpisodeLoaderContext {
+  background?: boolean;
+}
+
+export type EpisodeMediaLoader = (
+  episode: EpisodeItem,
+  signal: AbortSignal,
+  context?: EpisodeLoaderContext,
+) => Promise<PreloadLoaderResult>;
 
 interface QueueJob {
   episode: EpisodeItem;
@@ -24,6 +32,7 @@ interface QueueJob {
   resolve: (value: CachedEpisodeMedia) => void;
   reject: (reason?: unknown) => void;
   started: boolean;
+  attempts: number;
 }
 
 export interface PreloadManagerOptions {
@@ -33,18 +42,22 @@ export interface PreloadManagerOptions {
   maxCacheBytes?: number;
   /** Maximum cached episode count (defaults to 15). */
   maxCacheCount?: number;
-  /** Custom loader for fetching/warming standard media streams. */
+  /** Custom loader for fetching/warming media streams. */
   loader?: EpisodeMediaLoader;
 }
 
 const DEFAULT_ESTIMATED_BYTES = 600 * 1024;
 
-async function defaultEpisodeLoader(episode: EpisodeItem, abortSignal: AbortSignal): Promise<PreloadLoaderResult> {
+async function defaultEpisodeLoader(
+  episode: EpisodeItem,
+  abortSignal: AbortSignal,
+  context: EpisodeLoaderContext = {},
+): Promise<PreloadLoaderResult> {
   abortSignal.throwIfAborted();
   const src = episode.src;
-  if (episode.source === "hongguo") return prepareHongguoEpisode(episode.vid, abortSignal);
-  // Standard HTTP/HTTPS media streams: warm via `fetch` with abort support and measure bytes when small,
-  // while keeping direct streaming URL if large or CORS-opaque.
+  if (episode.source === "hongguo") {
+    return prepareHongguoEpisode(episode.vid, abortSignal, { background: context.background });
+  }
   if (/^https?:\/\//i.test(src)) {
     const res = await fetch(src, { method: "GET", signal: abortSignal });
     if (!res.ok) {
@@ -52,14 +65,19 @@ async function defaultEpisodeLoader(episode: EpisodeItem, abortSignal: AbortSign
     }
     const buf = await res.arrayBuffer();
     abortSignal.throwIfAborted();
+    if (platform.os === "windows") {
+      // Win32 Media Foundation plays HTTP(S) URLs directly rather than `blob:nsh://` URLs
+      return {
+        resolvedUrl: src,
+        sizeBytes: Math.max(1, buf.byteLength),
+      };
+    }
     const blob = new Blob([buf], { type: res.headers.get("content-type") || "video/mp4" });
     return {
       resolvedUrl: URL.createObjectURL(blob),
       sizeBytes: Math.max(1, buf.byteLength),
     };
   }
-  // Bundled `asset:/` or local `blob:`/`file:` media: yield one microtask turn so active playback
-  // preempts queued background prefetches deterministically.
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(resolve, 12);
     abortSignal.addEventListener(
@@ -81,9 +99,10 @@ async function defaultEpisodeLoader(episode: EpisodeItem, abortSignal: AbortSign
  * Sequential Multi-Episode Preloader & LRU Cache Queue.
  *
  * - Preloads up to `prefetchAheadCount` (default 3) upcoming episodes sequentially (`1 -> 2 -> 3`).
- * - Active playback requests jump to the front of the queue ahead of pending prefetches.
- * - Switching to an episode already in-flight reuses the existing download promise.
- * - Enforces `maxCacheBytes` (128 MB) & `maxCacheCount` (15) while protecting active & upcoming targets.
+ * - Synchronous `peekCached(vid)` enables 0ms zero-microtask switching & standby `<Video>` pre-decoding.
+ * - Cache hits on `acquireForPlayback` NEVER abort already-running upcoming prefetches (e.g. Ep 3 keeps downloading when switching to cached Ep 2).
+ * - Uncached active playback requests jump ahead of queued prefetches and preempt unrelated active prefetches.
+ * - `cancelPendingPrefetches()` stops background network activity on Theater exit while preserving cached episodes in the 128 MB LRU cache.
  */
 export class EpisodePreloadManager {
   readonly prefetchAheadCount: number;
@@ -98,13 +117,13 @@ export class EpisodePreloadManager {
   private activeVid: string | null = null;
   private prefetchTargets = new Set<string>();
 
-  /** Reactive map of `vid -> PreloadStatus` for UI badges and observability. */
+  /** Reactive map of `vid -> PreloadStatus` for UI indicators and standby pre-decoder triggers. */
   readonly statusByVid = signal<Record<string, PreloadStatus>>({});
 
   constructor(options: PreloadManagerOptions = {}) {
     this.prefetchAheadCount = options.prefetchAheadCount ?? 3;
-    this.maxCacheBytes = options.maxCacheBytes ?? 128 * 1024 * 1024;
-    this.maxCacheCount = options.maxCacheCount ?? 15;
+    this.maxCacheBytes = options.maxCacheBytes ?? 384 * 1024 * 1024;
+    this.maxCacheCount = options.maxCacheCount ?? 36;
     this.loader = options.loader ?? defaultEpisodeLoader;
   }
 
@@ -121,6 +140,11 @@ export class EpisodePreloadManager {
 
   isCached(vid: string): boolean {
     return this.cache.has(vid);
+  }
+
+  /** Synchronous read-only cache lookup (0ms, no microtask hop, used by Dual-Slot `<Video>` standby deck). */
+  peekCached(vid: string): CachedEpisodeMedia | null {
+    return this.cache.get(vid) ?? null;
   }
 
   totalCachedBytes(): number {
@@ -140,17 +164,16 @@ export class EpisodePreloadManager {
     this.setStatus(vid, "idle");
   }
 
-  /** Acquires an episode for immediate playback, reusing cache or in-flight work and preempting queued prefetches. */
+  /**
+   * Acquires an episode for immediate playback:
+   * 1. If already cached, returns immediately WITHOUT aborting in-flight prefetches of subsequent episodes.
+   * 2. If already in-flight (`episode.vid`), upgrades its priority to `"playback"` and reuses the same Promise.
+   * 3. If uncached and not in-flight, aborts any other in-flight job blocking the lane (unless that job is an unstarted queued prefetch, which simply yields queue priority) so foreground playback starts immediately.
+   */
   acquireForPlayback(episode: EpisodeItem): Promise<CachedEpisodeMedia> {
     this.activeVid = episode.vid;
-    for (const [vid, job] of this.inFlight) {
-      if (vid === episode.vid || (!job.started && job.priority === "prefetch")) continue;
-      job.controller.abort(new Error("Playback superseded"));
-      this.removeQueuedJob(job);
-      this.inFlight.delete(vid);
-      this.setStatus(vid, "idle");
-      if (!job.started) job.reject(job.controller.signal.reason);
-    }
+
+    // 1. Fast path: already in cache -> keep in-flight upcoming prefetches running uninterrupted!
     const hit = this.cache.get(episode.vid);
     if (hit) {
       hit.timestamp = Date.now();
@@ -160,6 +183,20 @@ export class EpisodePreloadManager {
       return Promise.resolve(hit);
     }
 
+    // 2. Abort any superseded foreground playback job (never keep two competing foreground playback jobs).
+    for (const [vid, job] of [...this.inFlight.entries()]) {
+      if (vid === episode.vid) continue;
+      if (job.priority === "playback") {
+        job.controller.abort(new Error("Playback superseded"));
+        this.removeQueuedJob(job);
+        this.inFlight.delete(vid);
+        if (this.activeJob === job) this.activeJob = null;
+        this.setStatus(vid, "idle");
+        if (!job.started) job.reject(job.controller.signal.reason);
+      }
+    }
+
+    // 3. Reuse existing in-flight job if `episode.vid` is already downloading or queued!
     const existing = this.inFlight.get(episode.vid);
     if (existing) {
       existing.priority = "playback";
@@ -175,6 +212,21 @@ export class EpisodePreloadManager {
       return existing.promise;
     }
 
+    // 4. Uncached miss: preempt any unrelated slow background prefetch so foreground playback starts immediately!
+    if (
+      this.activeJob &&
+      this.activeJob.priority === "prefetch" &&
+      this.activeJob.episode.vid !== episode.vid &&
+      (episode.source === "hongguo" ||
+        this.activeJob.episode.vid_index > episode.vid_index + this.prefetchAheadCount)
+    ) {
+      const stale = this.activeJob;
+      this.activeJob = null;
+      stale.controller.abort(new Error("Preempted by foreground playback"));
+      this.inFlight.delete(stale.episode.vid);
+      this.setStatus(stale.episode.vid, "idle");
+    }
+
     return this.enqueue(episode, "playback");
   }
 
@@ -187,32 +239,45 @@ export class EpisodePreloadManager {
     const nextTargetSet = new Set(upcoming.map((ep) => ep.vid));
     this.prefetchTargets = nextTargetSet;
 
-    // Cancel queued (not-yet-started or obsolete prefetch) jobs that are neither activeVid nor in upcoming targets.
+    // Cancel queued or obsolete prefetch jobs that are neither `activeVid` nor in `nextTargetSet`.
     for (const [vid, job] of [...this.inFlight.entries()]) {
       if (job.priority === "prefetch" && vid !== this.activeVid && !nextTargetSet.has(vid)) {
         job.controller.abort(new Error("Prefetch superseded"));
         this.removeQueuedJob(job);
         this.inFlight.delete(vid);
+        if (this.activeJob === job) this.activeJob = null;
         if (!job.started) job.reject(job.controller.signal.reason);
         if (!this.cache.has(vid)) this.setStatus(vid, "idle");
       }
     }
 
     for (const ep of upcoming) {
-      if (this.cache.has(ep.vid)) {
+      const cached = this.cache.get(ep.vid);
+      if (cached) {
         this.setStatus(ep.vid, "ready");
+        // Keep backend LRU & disk-cache warm even across long watch sessions
+        if (ep.source === "hongguo" && Date.now() - cached.timestamp > 30_000) {
+          cached.timestamp = Date.now();
+          void prepareHongguoEpisode(ep.vid, new AbortController().signal, { background: true })
+            .then((fresh) => {
+              const cur = this.cache.get(ep.vid);
+              if (cur && fresh.resolvedUrl) cur.resolvedUrl = fresh.resolvedUrl;
+            })
+            .catch(() => {});
+        }
         continue;
       }
       if (this.inFlight.has(ep.vid)) continue;
       void this.enqueue(ep, "prefetch").catch(() => {
-        // Background prefetch errors do not interrupt foreground playback; retry occurs when needed.
+        // Background prefetch errors do not interrupt foreground playback.
       });
     }
 
+    this.pump();
     return upcoming;
   }
 
-  private enqueue(episode: EpisodeItem, priority: "playback" | "prefetch"): Promise<CachedEpisodeMedia> {
+  private enqueue(episode: EpisodeItem, priority: "playback" | "prefetch", attempts = 0): Promise<CachedEpisodeMedia> {
     let resolveFn!: (value: CachedEpisodeMedia) => void;
     let rejectFn!: (reason?: unknown) => void;
     const promise = new Promise<CachedEpisodeMedia>((res, rej) => {
@@ -228,6 +293,7 @@ export class EpisodePreloadManager {
       resolve: resolveFn,
       reject: rejectFn,
       started: false,
+      attempts,
     };
 
     this.inFlight.set(episode.vid, job);
@@ -238,7 +304,11 @@ export class EpisodePreloadManager {
       if (insertAt === -1) this.queue.push(job);
       else this.queue.splice(insertAt, 0, job);
     } else {
-      this.queue.push(job);
+      const insertAt = this.queue.findIndex(
+        (j) => j.priority === "prefetch" && j.episode.vid_index > episode.vid_index,
+      );
+      if (insertAt === -1) this.queue.push(job);
+      else this.queue.splice(insertAt, 0, job);
     }
 
     this.pump();
@@ -253,11 +323,15 @@ export class EpisodePreloadManager {
   private pump(): void {
     if (this.activeJob || this.queue.length === 0) return;
     const next = this.queue.shift()!;
+    this.runJob(next);
+  }
+
+  private runJob(next: QueueJob): void {
     this.activeJob = next;
     next.started = true;
     this.setStatus(next.episode.vid, "loading");
 
-    this.loader(next.episode, next.controller.signal)
+    this.loader(next.episode, next.controller.signal, { background: next.priority === "prefetch" })
       .then((loaded) => {
         next.controller.signal.throwIfAborted();
         const entry: CachedEpisodeMedia = {
@@ -278,14 +352,48 @@ export class EpisodePreloadManager {
         next.resolve(entry);
       })
       .catch((err) => {
-        if (!next.controller.signal.aborted) {
-          if (this.inFlight.get(next.episode.vid) === next) this.setStatus(next.episode.vid, "error");
+        const wasAborted = next.controller.signal.aborted;
+
+        // Foreground playback transient hiccup (e.g. CDN ECONNRESET or cold-start signer restart): retry up to 2 times transparently!
+        if (!wasAborted && next.priority === "playback" && next.attempts < 2) {
+          next.attempts += 1;
+          const backoffMs = next.attempts === 1 ? 450 : 1800;
+          setTimeout(() => {
+            if (next.controller.signal.aborted || this.activeJob !== next) return;
+            this.runJob(next);
+          }, backoffMs);
+          return;
         }
+
         if (this.inFlight.get(next.episode.vid) === next) {
           this.inFlight.delete(next.episode.vid);
         }
         if (this.activeJob === next) {
           this.activeJob = null;
+        }
+        // Single automatic retry for transient background prefetch hiccups if still in `prefetchTargets`
+        if (
+          !wasAborted &&
+          next.priority === "prefetch" &&
+          next.attempts < 1 &&
+          this.prefetchTargets.has(next.episode.vid)
+        ) {
+          this.setStatus(next.episode.vid, "queued");
+          this.pump();
+          setTimeout(() => {
+            if (
+              this.prefetchTargets.has(next.episode.vid) &&
+              !this.cache.has(next.episode.vid) &&
+              !this.inFlight.has(next.episode.vid)
+            ) {
+              void this.enqueue(next.episode, "prefetch", next.attempts + 1).catch(() => {});
+            }
+          }, 600);
+          next.reject(err);
+          return;
+        }
+        if (!wasAborted) {
+          this.setStatus(next.episode.vid, "error");
         }
         this.pump();
         next.reject(err);
@@ -294,7 +402,6 @@ export class EpisodePreloadManager {
 
   private storeInCache(entry: CachedEpisodeMedia): void {
     if (entry.sizeBytes > this.maxCacheBytes) {
-      // Single episode exceeds budget; still deliver to caller without evicting everything else permanently.
       return;
     }
     this.cache.delete(entry.vid);
@@ -306,7 +413,6 @@ export class EpisodePreloadManager {
     const isProtected = (vid: string) =>
       vid === justAddedVid || vid === this.activeVid || this.prefetchTargets.has(vid);
 
-    // Pass 1: Evict oldest non-protected entries first.
     for (const [vid, item] of [...this.cache.entries()]) {
       if (this.cache.size <= this.maxCacheCount && this.totalCachedBytes() <= this.maxCacheBytes) {
         return;
@@ -318,7 +424,6 @@ export class EpisodePreloadManager {
       }
     }
 
-    // Pass 2: If still over hard cap, evict oldest entries except `justAddedVid` and `activeVid`.
     for (const [vid, item] of [...this.cache.entries()]) {
       if (this.cache.size <= this.maxCacheCount && this.totalCachedBytes() <= this.maxCacheBytes) {
         return;
@@ -341,17 +446,23 @@ export class EpisodePreloadManager {
     }
   }
 
-  /** Cancels all pending jobs and clears cached entries. */
-  clearAll(): void {
-    for (const job of this.inFlight.values()) {
-      job.controller.abort(new Error("Cleared"));
+  /** Stops queued/in-flight downloads when leaving Theater while keeping completed episodes in the 128 MB LRU cache. */
+  cancelPendingPrefetches(): void {
+    for (const [vid, job] of [...this.inFlight.entries()]) {
+      job.controller.abort(new Error("Theater exited"));
       if (!job.started) job.reject(job.controller.signal.reason);
+      if (!this.cache.has(vid)) this.setStatus(vid, "idle");
     }
     this.queue.length = 0;
     this.inFlight.clear();
     this.activeJob = null;
     this.activeVid = null;
     this.prefetchTargets.clear();
+  }
+
+  /** Cancels all pending jobs and clears cached entries. */
+  clearAll(): void {
+    this.cancelPendingPrefetches();
     for (const item of this.cache.values()) {
       this.revokeIfBlob(item.resolvedUrl);
     }

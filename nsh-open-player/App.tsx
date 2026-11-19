@@ -1,4 +1,5 @@
 import { batch, type InputRef, keymap, mount, platform, signal, View } from "nsh";
+import { currentWindow, isAvailable as desktopWindowAvailable } from "nsh/desktop";
 import { AppHeader } from "./src/components/AppHeader";
 import {
   AboutModal,
@@ -8,6 +9,7 @@ import {
   ShortcutsModal,
   SourceConfigModal,
 } from "./src/components/Modals";
+import { parseSeasonInfo } from "./src/domain/seasons";
 import type {
   ActorDetail,
   ActorSummary,
@@ -15,6 +17,7 @@ import type {
   SeasonEntry,
   SeriesDetail,
   SeriesSummary,
+  WatchHistoryEntry,
 } from "./src/domain/types";
 import { ActorRankingView } from "./src/pages/ActorRankingView";
 import { CatalogView } from "./src/pages/CatalogView";
@@ -26,12 +29,15 @@ import {
   fetchSeriesDetail,
   importLocalMediaFiles,
   loadCustomCatalogFromUrl,
+  peekCachedSeriesDetail,
+  prefetchSeriesDetail,
+  registerSourceAdapter,
   resolveRelatedSeasons,
   searchDramas,
-  registerSourceAdapter,
 } from "./src/services/catalog";
 import { createHongguoSource } from "./src/services/hongguo-source";
 import {
+  clearWatchHistory,
   cycleAppearance,
   favoritesList,
   getSeriesProgress,
@@ -40,6 +46,7 @@ import {
   isSeriesFavorited,
   mutateSearchHistory,
   preferences,
+  removeHistorySeries,
   searchHistoryList,
   toggleFavoriteSeries,
   updatePlayerPreferences,
@@ -48,6 +55,8 @@ import { showToast, UiToastHost } from "./src/ui";
 import { UiGalleryModal } from "./src/ui/gallery";
 
 function App() {
+  const win = desktopWindowAvailable ? currentWindow() : null;
+  win?.set({ titleBar: { style: "hidden", height: 40 } });
   let searchInputRef: InputRef | undefined;
 
   const viewMode = signal<"catalog" | "theater">("catalog");
@@ -72,6 +81,7 @@ function App() {
 
   // Active Theater state
   const activeSeries = signal<SeriesDetail | null>(null);
+  const loadingSeriesDetail = signal(false);
   const theaterInitialEp = signal(1);
   const theaterInitialSec = signal(0);
   const relatedSeasons = signal<SeasonEntry[]>([]);
@@ -92,6 +102,10 @@ function App() {
   let catalogLoadSeq = 0;
   let actorLoadSeq = 0;
   let seasonsLoadSeq = 0;
+  let openTheaterSeq = 0;
+
+  const isFullScreenTheater = () =>
+    viewMode() === "theater" && win?.state()?.mode === "fullScreen";
 
   const hasAnyModalOpen = () =>
     actorModalOpen() ||
@@ -102,18 +116,28 @@ function App() {
     galleryModalOpen() ||
     aboutModalOpen();
 
-  const loadCatalog = async (tab = currentTab(), page = catalogPage(), query = activeSearchQuery()) => {
+  const loadCatalog = async (
+    tab = currentTab(),
+    page = catalogPage(),
+    query = activeSearchQuery(),
+    options: { refresh?: boolean } = {},
+  ) => {
     if (tab === "history" || tab === "favorites" || tab === "actors") {
       catalogLoading.set(false);
       catalogError.set(null);
       return;
     }
     const seq = ++catalogLoadSeq;
-    catalogLoading.set(true);
+    // Only show full-page skeletons if we don't already have items on the initial page or if explicitly changing pages/queries
+    if (catalogItems().length === 0 || options.refresh) {
+      catalogLoading.set(true);
+    }
     catalogError.set(null);
     try {
       const res =
-        tab === "search" ? await searchDramas(query, page) : await fetchCatalogPage(tab, page);
+        tab === "search"
+          ? await searchDramas(query, page)
+          : await fetchCatalogPage(tab, page, options);
       if (seq !== catalogLoadSeq) return;
       batch(() => {
         catalogItems.set(res.items);
@@ -121,6 +145,21 @@ function App() {
         catalogHasMore.set(res.hasMore);
         catalogLoading.set(false);
       });
+      // Warm detail of top #1 drama & next catalog page for instant first click!
+      if (res.items.length > 0 && page === 1) {
+        if (tab === "search") {
+          prefetchSeriesDetail(res.items[0].series_id);
+        } else {
+          setTimeout(() => {
+            if (res.items[0]) prefetchSeriesDetail(res.items[0].series_id);
+          }, 200);
+        }
+      }
+      if (res.hasMore && tab !== "search") {
+        setTimeout(() => {
+          void fetchCatalogPage(tab, page + 1).catch(() => {});
+        }, 500);
+      }
     } catch (err) {
       if (seq !== catalogLoadSeq) return;
       catalogLoading.set(false);
@@ -128,11 +167,17 @@ function App() {
     }
   };
 
-  const loadActors = async (gender = actorGender(), page = actorPage()) => {
+  const loadActors = async (
+    gender = actorGender(),
+    page = actorPage(),
+    options: { refresh?: boolean } = {},
+  ) => {
     const seq = ++actorLoadSeq;
-    loadingActors.set(true);
+    if (actors().length === 0 || options.refresh) {
+      loadingActors.set(true);
+    }
     try {
-      const res = await fetchActorRanking(gender, page);
+      const res = await fetchActorRanking(gender, page, options);
       if (seq !== actorLoadSeq) return;
       batch(() => {
         actors.set(res.items);
@@ -164,8 +209,11 @@ function App() {
     }
   };
 
-  // Bootstrap store & initial catalog
   void hydrateStore().then(() => {
+    const latest = historyList()[0];
+    if (latest) {
+      setTimeout(() => prefetchSeriesDetail(latest.series_id), 150);
+    }
     const customUrl = preferences().customCatalogUrl;
     if (customUrl) {
       void loadCustomCatalogFromUrl(customUrl)
@@ -176,7 +224,6 @@ function App() {
     }
   });
 
-  // Global shortcuts (`Mod+K` to focus search, `?` for shortcuts help)
   keymap.bind("mod+k", () => {
     searchInputRef?.focus();
   });
@@ -216,7 +263,21 @@ function App() {
     return catalogItems();
   };
 
+  const exitTheaterToCatalog = () => {
+    openTheaterSeq++;
+    loadingSeriesDetail.set(false);
+    if (win?.state()?.mode === "fullScreen") {
+      win.setMode("normal");
+    }
+    viewMode.set("catalog");
+  };
+
   const switchTab = (tab: CatalogTab) => {
+    openTheaterSeq++;
+    loadingSeriesDetail.set(false);
+    if (win?.state()?.mode === "fullScreen") {
+      win.setMode("normal");
+    }
     batch(() => {
       viewMode.set("catalog");
       currentTab.set(tab);
@@ -235,34 +296,112 @@ function App() {
       switchTab("hot-drama");
       return;
     }
+    openTheaterSeq++;
+    loadingSeriesDetail.set(false);
     void mutateSearchHistory("add", kw);
     batch(() => {
       searchDraft.set(kw);
       activeSearchQuery.set(kw);
       viewMode.set("catalog");
+      catalogItems.set([]);
       currentTab.set("search");
       catalogPage.set(1);
     });
-    void loadCatalog("search", 1, kw);
+    void loadCatalog("search", 1, kw, { refresh: true });
   };
 
-  const openTheater = async (summary: SeriesSummary) => {
-    try {
-      const detail = await fetchSeriesDetail(summary.series_id);
-      const saved = getSeriesProgress(detail.series_id);
+  /**
+   * Optimistic Instant Theater Entry:
+   * Enters Theater in <16ms using cached detail (0ms if hovered/visited!) or an optimistic shell
+   * while `fetchSeriesDetail` completes in parallel with `resolveRelatedSeasons`.
+   */
+  const openTheater = async (summary: SeriesSummary, overrideEp?: number, overrideSec?: number) => {
+    const seq = ++openTheaterSeq;
+    const saved = getSeriesProgress(summary.series_id);
+    const targetEp = overrideEp ?? saved?.episode_index ?? 1;
+    const targetSec = overrideSec ?? (overrideEp ? 0 : (saved?.position_sec ?? 0));
+
+    const { baseTitle } = parseSeasonInfo(summary.series_title);
+    const sameSeriesFamily = seriesBaseTitle() && seriesBaseTitle() === baseTitle;
+
+    const cachedDetail = peekCachedSeriesDetail(summary.series_id);
+    if (cachedDetail) {
       batch(() => {
-        activeSeries.set(detail);
-        theaterInitialEp.set(saved?.episode_index ?? 1);
-        theaterInitialSec.set(saved?.position_sec ?? 0);
+        activeSeries.set(cachedDetail);
+        loadingSeriesDetail.set(false);
+        theaterInitialEp.set(targetEp);
+        theaterInitialSec.set(targetSec);
+        if (!sameSeriesFamily) {
+          relatedSeasons.set([]);
+          seriesBaseTitle.set(baseTitle);
+        }
         viewMode.set("theater");
         actorModalOpen.set(false);
         seasonsModalOpen.set(false);
         dramaDetailOpen.set(false);
       });
-      void loadSeasonsForSeries(detail, false);
+      void loadSeasonsForSeries(cachedDetail, false);
+      return;
+    }
+
+    // Optimistic shell for instant transition (<16ms) before live HTTP `/series/:id` finishes!
+    const optimisticShell: SeriesDetail = {
+      ...summary,
+      total: summary.episode_count || 0,
+      intro: summary.description || "",
+      episodes: [],
+      celebrities: [],
+    };
+
+    batch(() => {
+      activeSeries.set(optimisticShell);
+      loadingSeriesDetail.set(true);
+      theaterInitialEp.set(targetEp);
+      theaterInitialSec.set(targetSec);
+      if (!sameSeriesFamily) {
+        relatedSeasons.set([]);
+        seriesBaseTitle.set(baseTitle);
+      }
+      viewMode.set("theater");
+      actorModalOpen.set(false);
+      seasonsModalOpen.set(false);
+      dramaDetailOpen.set(false);
+    });
+
+    // Kick off related-seasons discovery in parallel with `fetchSeriesDetail`!
+    void loadSeasonsForSeries(summary, false);
+
+    try {
+      const detail = await fetchSeriesDetail(summary.series_id);
+      if (seq !== openTheaterSeq) return;
+      batch(() => {
+        activeSeries.set(detail);
+        loadingSeriesDetail.set(false);
+      });
     } catch (err) {
+      if (seq !== openTheaterSeq) return;
+      batch(() => {
+        loadingSeriesDetail.set(false);
+        viewMode.set("catalog");
+      });
       showToast(err instanceof Error ? err.message : "无法打开该剧目", "warning");
     }
+  };
+
+  const handleResumeHistoryEntry = (entry: WatchHistoryEntry) => {
+    void openTheater(
+      {
+        series_id: entry.series_id,
+        series_title: entry.series_title,
+        cover: entry.cover,
+        episode_count: entry.episode_count,
+        category: "real-drama",
+        tags: [],
+        description: "",
+      },
+      entry.episode_index,
+      entry.position_sec,
+    );
   };
 
   const openActorModalById = async (actorId: string) => {
@@ -304,34 +443,36 @@ function App() {
 
   return (
     <View class="flex-1 bg-background pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]">
-      <AppHeader
-        currentTab={currentTab()}
-        inTheater={viewMode() === "theater"}
-        searchKeyword={searchDraft()}
-        searchHistory={searchHistoryList()}
-        appearance={preferences().appearance}
-        searchInputRef={(node) => {
-          searchInputRef = node;
-        }}
-        onGoHome={() => switchTab("hot-drama")}
-        onSwitchTab={switchTab}
-        onSearchKeywordChange={(v) => searchDraft.set(v)}
-        onSubmitSearch={() => runSearch(searchDraft())}
-        onSelectHistoryKeyword={runSearch}
-        onRemoveHistoryKeyword={(kw) => void mutateSearchHistory("remove", kw)}
-        onClearSearchHistory={() => void mutateSearchHistory("clear")}
-        onImportLocalMedia={() => void handleImportLocal()}
-        onOpenSourceModal={() => sourceModalOpen.set(true)}
-        onCycleAppearance={() => {
-          const next = cycleAppearance();
-          showToast(
-            next === "dark" ? "已切换至深色影院外观" : next === "light" ? "已切换至浅色纸感外观" : "已切换为跟随系统外观",
-          );
-        }}
-        onOpenGalleryModal={() => galleryModalOpen.set(true)}
-        onOpenShortcutsModal={() => shortcutsModalOpen.set(true)}
-        onOpenAboutModal={() => aboutModalOpen.set(true)}
-      />
+      <If when={!isFullScreenTheater()}>
+        <AppHeader
+          currentTab={currentTab()}
+          inTheater={viewMode() === "theater"}
+          searchKeyword={searchDraft()}
+          searchHistory={searchHistoryList()}
+          appearance={preferences().appearance}
+          searchInputRef={(node) => {
+            searchInputRef = node;
+          }}
+          onGoHome={() => switchTab("hot-drama")}
+          onSwitchTab={switchTab}
+          onSearchKeywordChange={(v) => searchDraft.set(v)}
+          onSubmitSearch={() => runSearch(searchDraft())}
+          onSelectHistoryKeyword={runSearch}
+          onRemoveHistoryKeyword={(kw) => void mutateSearchHistory("remove", kw)}
+          onClearSearchHistory={() => void mutateSearchHistory("clear")}
+          onImportLocalMedia={() => void handleImportLocal()}
+          onOpenSourceModal={() => sourceModalOpen.set(true)}
+          onCycleAppearance={() => {
+            const next = cycleAppearance();
+            showToast(
+              next === "dark" ? "已切换至深色影院外观" : next === "light" ? "已切换至浅色纸感外观" : "已切换为跟随系统外观",
+            );
+          }}
+          onOpenGalleryModal={() => galleryModalOpen.set(true)}
+          onOpenShortcutsModal={() => shortcutsModalOpen.set(true)}
+          onOpenAboutModal={() => aboutModalOpen.set(true)}
+        />
+      </If>
 
       <If
         when={viewMode() === "theater" ? activeSeries() : null}
@@ -343,15 +484,30 @@ function App() {
                 currentTab={currentTab()}
                 activeQuery={activeSearchQuery()}
                 dramas={displayedCatalogDramas()}
+                latestHistory={historyList()[0] ?? null}
                 loading={catalogLoading()}
                 error={catalogError()}
                 page={catalogPage()}
                 hasMore={catalogHasMore()}
                 onQuickSearch={runSearch}
                 onSelectDrama={(drama) => void openTheater(drama)}
-                onRetry={() => void loadCatalog()}
+                onResumeLatest={handleResumeHistoryEntry}
+                onRemoveHistoryItem={(sid) => {
+                  void removeHistorySeries(sid);
+                  showToast("已从观看历史移除");
+                }}
+                onClearHistory={() => {
+                  void clearWatchHistory();
+                  showToast("已清空观看历史");
+                }}
+                onRefresh={() => {
+                  catalogItems.set([]);
+                  void loadCatalog(currentTab(), catalogPage(), activeSearchQuery(), { refresh: true });
+                }}
+                onRetry={() => void loadCatalog(currentTab(), catalogPage(), activeSearchQuery(), { refresh: true })}
                 onChangePage={(delta) => {
                   const next = Math.max(1, catalogPage() + delta);
+                  catalogItems.set([]);
                   void loadCatalog(currentTab(), next, activeSearchQuery());
                 }}
               />
@@ -366,10 +522,12 @@ function App() {
               loading={loadingActors()}
               onChangeGender={(g) => {
                 actorGender.set(g);
+                actors.set([]);
                 void loadActors(g, 1);
               }}
               onChangePage={(delta) => {
                 const next = Math.max(1, actorPage() + delta);
+                actors.set([]);
                 void loadActors(actorGender(), next);
               }}
               onSelectActor={(actor) => void openActorModalById(actor.actor_id)}
@@ -380,6 +538,7 @@ function App() {
         {(series) => (
           <TheaterView
             series={series()}
+            loadingSeriesDetail={loadingSeriesDetail()}
             initialEpisodeIndex={theaterInitialEp()}
             initialResumeSec={theaterInitialSec()}
             isFavorited={isSeriesFavorited(series().series_id)}
@@ -388,12 +547,14 @@ function App() {
             baseTitle={seriesBaseTitle()}
             checkingSeasons={checkingSeasons()}
             hasModalOpen={hasAnyModalOpen()}
-            onExitTheater={() => viewMode.set("catalog")}
+            onExitTheater={exitTheaterToCatalog}
             onToggleFavorite={handleToggleFavoriteActive}
             onOpenDramaDetail={() => dramaDetailOpen.set(true)}
             onOpenSeasonsModal={() => {
               seasonsModalOpen.set(true);
-              void loadSeasonsForSeries(series(), true);
+              if (relatedSeasons().length <= 1 && !checkingSeasons()) {
+                void loadSeasonsForSeries(series(), true);
+              }
             }}
             onRefreshSeasons={() => void loadSeasonsForSeries(series(), true)}
             onSelectSeason={(season) => void openTheater(season)}
@@ -414,7 +575,9 @@ function App() {
           dramaDetailOpen.set(false);
           seasonsModalOpen.set(true);
           const cur = activeSeries();
-          if (cur) void loadSeasonsForSeries(cur, true);
+          if (cur && relatedSeasons().length <= 1 && !checkingSeasons()) {
+            void loadSeasonsForSeries(cur, true);
+          }
         }}
         onSelectActor={(c) => {
           dramaDetailOpen.set(false);

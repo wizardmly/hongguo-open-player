@@ -1,3 +1,4 @@
+import { platform } from "nsh";
 import process from "process";
 
 function getBaseUrl(): string {
@@ -17,9 +18,28 @@ export async function backendRequest<T>(endpoint: string, options: RequestInit =
   return result;
 }
 
-export async function prepareHongguoEpisode(vid: string, signal: AbortSignal, refresh = false) {
-  const result = await backendRequest<{ path: string; sizeBytes: number }>(`/prepare/${encodeURIComponent(vid)}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh }), signal,
-  });
-  return { resolvedUrl: getBaseUrl() + result.path, sizeBytes: result.sizeBytes };
+export interface PrepareEpisodeOptions {
+  refresh?: boolean;
+  background?: boolean;
+}
+
+export async function prepareHongguoEpisode(
+  vid: string,
+  signal: AbortSignal,
+  options: PrepareEpisodeOptions = {},
+) {
+  const result = await backendRequest<{ path: string; sizeBytes: number; filePath?: string | null }>(
+    `/prepare/${encodeURIComponent(vid)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        refresh: Boolean(options.refresh),
+        background: Boolean(options.background),
+      }),
+      signal,
+    },
+  );
+  const directPath = platform.os === "windows" && result.filePath ? result.filePath : null;
+  return { resolvedUrl: directPath || getBaseUrl() + result.path, sizeBytes: result.sizeBytes };
 }

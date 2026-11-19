@@ -69,6 +69,11 @@ let externalAdapter: DramaSourceAdapter | null = null;
 export function registerSourceAdapter(adapter: DramaSourceAdapter | null): void {
   externalAdapter = adapter;
   seasonsCache.clear();
+  catalogPageCache.clear();
+  actorPageCache.clear();
+  seriesDetailCache.clear();
+  seriesDetailInFlight.clear();
+  danmakuCache.clear();
 }
 
 function buildEpisodes(
@@ -371,6 +376,14 @@ const FEATURED_SERIES: SeriesDetail[] = [
 
 const importedSeries = signal<SeriesDetail[]>([]);
 const seasonsCache = new Map<string, { items: SeasonEntry[]; expires: number }>();
+const catalogPageCache = new Map<string, { data: PagedResult<SeriesSummary>; expires: number }>();
+const actorPageCache = new Map<string, { data: PagedResult<ActorSummary> & { rankDate: string }; expires: number }>();
+const seriesDetailCache = new Map<string, { detail: SeriesDetail; expires: number }>();
+const seriesDetailInFlight = new Map<string, Promise<SeriesDetail>>();
+const danmakuCache = new Map<string, DanmakuComment[]>();
+
+const CATALOG_TTL_MS = 180_000;
+const DETAIL_TTL_MS = 300_000;
 
 function allSeriesPool(): SeriesDetail[] {
   return [...importedSeries(), ...FEATURED_SERIES, ...WANYAO_SEASONS.slice(1)];
@@ -378,36 +391,52 @@ function allSeriesPool(): SeriesDetail[] {
 
 const PAGE_SIZE = 10;
 
-/** Queries catalog tab pages (`hot-drama`, `real-drama`, `comic-drama`, `ai-drama`). */
-export async function fetchCatalogPage(tab: CatalogTab, page = 1): Promise<PagedResult<SeriesSummary>> {
+/** Queries catalog tab pages (`hot-drama`, `real-drama`, `comic-drama`, `ai-drama`) with SWR caching. */
+export async function fetchCatalogPage(
+  tab: CatalogTab,
+  page = 1,
+  options: { refresh?: boolean } = {},
+): Promise<PagedResult<SeriesSummary>> {
+  const cacheKey = `${tab}:${page}`;
+  if (!options.refresh) {
+    const hit = catalogPageCache.get(cacheKey);
+    if (hit && hit.expires > Date.now()) {
+      return hit.data;
+    }
+  }
+
+  let data: PagedResult<SeriesSummary>;
   if (externalAdapter) {
     const local = page === 1 ? importedSeries().filter(item => tab === "hot-drama" || item.category === tab) : [];
     try {
       const result = await externalAdapter.catalog(tab, page);
-      return { ...result, items: [...local, ...result.items.filter(item => !local.some(added => added.series_id === item.series_id))] };
+      data = { ...result, items: [...local, ...result.items.filter(item => !local.some(added => added.series_id === item.series_id))] };
     } catch (error) {
       if (!local.length) throw error;
-      return { items: local, page, hasMore: false, total: local.length };
+      data = { items: local, page, hasMore: false, total: local.length };
     }
+  } else {
+    const pool = allSeriesPool();
+    const filtered = pool.filter((item) => {
+      if (tab === "hot-drama") return true;
+      if (tab === "real-drama" || tab === "comic-drama" || tab === "ai-drama") {
+        return item.category === tab;
+      }
+      return true;
+    });
+
+    const start = (Math.max(1, page) - 1) * PAGE_SIZE;
+    const slice = filtered.slice(start, start + PAGE_SIZE);
+    data = {
+      items: slice,
+      page,
+      hasMore: start + PAGE_SIZE < filtered.length,
+      total: filtered.length,
+    };
   }
 
-  const pool = allSeriesPool();
-  const filtered = pool.filter((item) => {
-    if (tab === "hot-drama") return true;
-    if (tab === "real-drama" || tab === "comic-drama" || tab === "ai-drama") {
-      return item.category === tab;
-    }
-    return true;
-  });
-
-  const start = (Math.max(1, page) - 1) * PAGE_SIZE;
-  const slice = filtered.slice(start, start + PAGE_SIZE);
-  return {
-    items: slice,
-    page,
-    hasMore: start + PAGE_SIZE < filtered.length,
-    total: filtered.length,
-  };
+  catalogPageCache.set(cacheKey, { data, expires: Date.now() + CATALOG_TTL_MS });
+  return data;
 }
 
 function normalizeSearchText(input: string): string {
@@ -462,22 +491,63 @@ export async function searchDramas(keyword: string, page = 1): Promise<PagedResu
   };
 }
 
-/** Fetches complete series detail and episode list by `seriesId`. */
-export async function fetchSeriesDetail(seriesId: string): Promise<SeriesDetail> {
-  const imported = importedSeries().find(item => item.series_id === seriesId);
+/** Synchronous cache peek for instant 0ms Theater entry when already fetched or hovered. */
+export function peekCachedSeriesDetail(seriesId: string): SeriesDetail | null {
+  const imported = importedSeries().find((item) => item.series_id === seriesId);
   if (imported) return imported;
-  if (externalAdapter) return externalAdapter.getSeriesDetail(seriesId);
-
-  const found = allSeriesPool().find((s) => s.series_id === seriesId);
-  if (!found) {
-    throw new Error("未找到该剧集详情，请检查片源配置后重试。");
+  const hit = seriesDetailCache.get(seriesId);
+  if (hit && hit.expires > Date.now()) return hit.detail;
+  if (!externalAdapter) {
+    return allSeriesPool().find((s) => s.series_id === seriesId) ?? null;
   }
-  return found;
+  return null;
+}
+
+/** Warms `SeriesDetail` in the background (e.g. when user hovers a `DramaCard` on desktop). */
+export function prefetchSeriesDetail(seriesId: string): void {
+  if (!seriesId || peekCachedSeriesDetail(seriesId) || seriesDetailInFlight.has(seriesId)) return;
+  void fetchSeriesDetail(seriesId).catch(() => {});
+}
+
+/** Fetches complete series detail and episode list by `seriesId` with deduplication and TTL caching. */
+export async function fetchSeriesDetail(seriesId: string, options: { refresh?: boolean } = {}): Promise<SeriesDetail> {
+  const imported = importedSeries().find((item) => item.series_id === seriesId);
+  if (imported) return imported;
+
+  if (!options.refresh) {
+    const hit = seriesDetailCache.get(seriesId);
+    if (hit && hit.expires > Date.now()) return hit.detail;
+    const inflight = seriesDetailInFlight.get(seriesId);
+    if (inflight) return inflight;
+  }
+
+  const job = (async () => {
+    if (externalAdapter) {
+      const detail = await externalAdapter.getSeriesDetail(seriesId);
+      seriesDetailCache.set(seriesId, { detail, expires: Date.now() + DETAIL_TTL_MS });
+      return detail;
+    }
+    const found = allSeriesPool().find((s) => s.series_id === seriesId);
+    if (!found) {
+      throw new Error("未找到该剧集详情，请检查片源配置后重试。");
+    }
+    seriesDetailCache.set(seriesId, { detail: found, expires: Date.now() + DETAIL_TTL_MS });
+    return found;
+  })();
+
+  seriesDetailInFlight.set(seriesId, job);
+  try {
+    return await job;
+  } finally {
+    if (seriesDetailInFlight.get(seriesId) === job) {
+      seriesDetailInFlight.delete(seriesId);
+    }
+  }
 }
 
 /**
- * Resolves all related seasons for `series`, scanning pages, filling missing season gaps
- * (such as Season 2 -> Season 4 missing Season 3), and preserving prior entries on refresh.
+ * Resolves all related seasons for `series`, scanning pages with early-stop when no new matching
+ * seasons appear, filling missing season gaps (`第N季`), and preserving prior entries on refresh.
  */
 export async function resolveRelatedSeasons(
   series: SeriesSummary,
@@ -492,17 +562,27 @@ export async function resolveRelatedSeasons(
     return { baseTitle, seasons: cached };
   }
 
-  const collected: SeriesSummary[] = [series];
-  const seen = new Set<string>();
-  for (let page = 1; page <= 50; page++) {
-    const res = await searchDramas(baseTitle, page);
-    collected.push(...res.items);
-    const fresh = res.items.filter(item => !seen.has(item.series_id));
-    for (const item of fresh) seen.add(item.series_id);
-    if (!res.hasMore || !fresh.length) break;
-  }
+  let merged = aggregateRelatedSeasons(baseTitle, [series], cached);
+  const seen = new Set<string>([series.series_id]);
+  let unproductivePages = 0;
 
-  let merged = aggregateRelatedSeasons(baseTitle, collected, cached);
+  // Scan up to 8 pages, stopping early once 2 consecutive pages yield zero new matching seasons for `baseTitle`.
+  for (let page = 1; page <= 8; page++) {
+    const res = await searchDramas(baseTitle, page);
+    const fresh = res.items.filter((item) => !seen.has(item.series_id));
+    for (const item of fresh) seen.add(item.series_id);
+    if (fresh.length === 0) break;
+
+    const prevCount = merged.length;
+    merged = aggregateRelatedSeasons(baseTitle, fresh, merged);
+    if (merged.length === prevCount) {
+      unproductivePages++;
+      if (unproductivePages >= 2) break;
+    } else {
+      unproductivePages = 0;
+    }
+    if (!res.hasMore) break;
+  }
 
   const missingNums = findMissingSeasonNumbers(merged);
   for (const missingNum of missingNums) {
@@ -515,27 +595,39 @@ export async function resolveRelatedSeasons(
     }
   }
 
-  seasonsCache.set(cacheKey, { items: merged, expires: Date.now() + 60000 });
+  seasonsCache.set(cacheKey, { items: merged, expires: Date.now() + 180_000 });
   return { baseTitle, seasons: merged };
 }
 
-/** Fetches ranked actors filtered by gender (`all` | `male` | `female`). */
+/** Fetches ranked actors filtered by gender (`all` | `male` | `female`) with SWR caching. */
 export async function fetchActorRanking(
   gender: "all" | "male" | "female" = "all",
   page = 1,
+  options: { refresh?: boolean } = {},
 ): Promise<PagedResult<ActorSummary> & { rankDate: string }> {
-  if (externalAdapter) return externalAdapter.getActorRanking(gender, page);
+  const cacheKey = `${gender}:${page}`;
+  if (!options.refresh) {
+    const hit = actorPageCache.get(cacheKey);
+    if (hit && hit.expires > Date.now()) return hit.data;
+  }
 
-  const filtered = ACTORS.filter((a) => (gender === "all" ? true : a.gender === gender));
-  const perPage = 8;
-  const start = (Math.max(1, page) - 1) * perPage;
-  return {
-    items: filtered.slice(start, start + perPage),
-    page,
-    hasMore: start + perPage < filtered.length,
-    total: filtered.length,
-    rankDate: "2026年11月16日",
-  };
+  let data: PagedResult<ActorSummary> & { rankDate: string };
+  if (externalAdapter) {
+    data = await externalAdapter.getActorRanking(gender, page);
+  } else {
+    const filtered = ACTORS.filter((a) => (gender === "all" ? true : a.gender === gender));
+    const perPage = 8;
+    const start = (Math.max(1, page) - 1) * perPage;
+    data = {
+      items: filtered.slice(start, start + perPage),
+      page,
+      hasMore: start + perPage < filtered.length,
+      total: filtered.length,
+      rankDate: "2026年11月16日",
+    };
+  }
+  actorPageCache.set(cacheKey, { data, expires: Date.now() + CATALOG_TTL_MS });
+  return data;
 }
 
 /** Fetches an actor's profile, co-stars, and paginated filmography. */
@@ -560,31 +652,56 @@ export async function fetchActorDetail(actorId: string): Promise<ActorDetail> {
   };
 }
 
-/** Returns realistic multi-tier Danmaku comments matching `theater-playback.jpg` color & `+likes` tiers. */
-export async function fetchEpisodeDanmaku(vid: string, episodeIndex: number, seriesId?: string): Promise<DanmakuComment[]> {
-  if (externalAdapter) return externalAdapter.getEpisodeDanmaku(vid, episodeIndex, seriesId);
+/** Returns realistic multi-tier Danmaku comments with LRU caching & background prefetching. */
+export async function fetchEpisodeDanmaku(
+  vid: string,
+  episodeIndex: number,
+  seriesId?: string,
+): Promise<DanmakuComment[]> {
+  const key = `${seriesId || ""}:${vid}`;
+  const cached = danmakuCache.get(key);
+  if (cached) return cached;
 
-  const templates = [
-    { offset: 0.2, text: "原来你就是姜月初是你啊！", likes: 2 },
-    { offset: 0.7, text: `回评：贼好看第 ${episodeIndex} 集老虎是伏笔`, likes: 8 },
-    { offset: 1.2, text: "[鼓掌][鼓掌][鼓掌][鼓掌][鼓掌]", likes: 20 },
-    { offset: 1.9, text: "有点像宁姚建模", likes: 44 },
-    { offset: 2.5, text: "二刷二刷", likes: 19 },
-    { offset: 3.1, text: "好看的，期待下季", likes: 28 },
-    { offset: 3.9, text: "入股不亏！画质太顶了", likes: 168, featured: true },
-    { offset: 4.8, text: "前方高能名场面预警", likes: 520, featured: true },
-    { offset: 6.0, text: "打卡留念", likes: 0 },
-    { offset: 7.2, text: "百妖谱展开这幕绝了", likes: 66 },
-    { offset: 8.6, text: "直接连看十集停不下来", likes: 15 },
-    { offset: 9.8, text: "下一集已经预载好啦无缝切！", likes: 132, featured: true },
-  ];
-  return templates.map((item, idx) => ({
-    id: `${vid}-dm-${idx}`,
-    time_sec: item.offset,
-    text: item.text,
-    likes: item.likes,
-    featured: item.featured,
-  }));
+  let items: DanmakuComment[];
+  if (externalAdapter) {
+    items = await externalAdapter.getEpisodeDanmaku(vid, episodeIndex, seriesId);
+  } else {
+    const templates = [
+      { offset: 0.2, text: "原来你就是姜月初是你啊！", likes: 2 },
+      { offset: 0.7, text: `回评：贼好看第 ${episodeIndex} 集老虎是伏笔`, likes: 8 },
+      { offset: 1.2, text: "[鼓掌][鼓掌][鼓掌][鼓掌][鼓掌]", likes: 20 },
+      { offset: 1.9, text: "有点像宁姚建模", likes: 44 },
+      { offset: 2.5, text: "二刷二刷", likes: 19 },
+      { offset: 3.1, text: "好看的，期待下季", likes: 28 },
+      { offset: 3.9, text: "入股不亏！画质太顶了", likes: 168, featured: true },
+      { offset: 4.8, text: "前方高能名场面预警", likes: 520, featured: true },
+      { offset: 6.0, text: "打卡留念", likes: 0 },
+      { offset: 7.2, text: "百妖谱展开这幕绝了", likes: 66 },
+      { offset: 8.6, text: "直接连看十集停不下来", likes: 15 },
+      { offset: 9.8, text: "下一集已经预载好啦无缝切！", likes: 132, featured: true },
+    ];
+    items = templates.map((item, idx) => ({
+      id: `${vid}-dm-${idx}`,
+      time_sec: item.offset,
+      text: item.text,
+      likes: item.likes,
+      featured: item.featured,
+    }));
+  }
+
+  if (danmakuCache.size >= 40) {
+    const oldest = danmakuCache.keys().next().value;
+    if (oldest) danmakuCache.delete(oldest);
+  }
+  danmakuCache.set(key, items);
+  return items;
+}
+
+/** Preloads Danmaku for an upcoming episode so Danmaku starts at 0.0s with zero network wait. */
+export function prefetchEpisodeDanmaku(vid: string, episodeIndex: number, seriesId?: string): void {
+  const key = `${seriesId || ""}:${vid}`;
+  if (danmakuCache.has(key)) return;
+  void fetchEpisodeDanmaku(vid, episodeIndex, seriesId).catch(() => {});
 }
 
 /** Imports local standard video files (`.mp4`/`.mov`/`.webm`) or `.json` catalog manifests via native picker. */
@@ -636,6 +753,7 @@ export async function importLocalMediaFiles(): Promise<SeriesDetail | null> {
 
   importedSeries.update((prev) => [created, ...prev]);
   seasonsCache.clear();
+  catalogPageCache.clear();
   return created;
 }
 
@@ -702,6 +820,7 @@ export function ingestExternalCatalogJson(rawJson: string): SeriesDetail[] {
       return [...valid, ...prev.filter((p) => !nextIds.has(p.series_id))];
     });
     seasonsCache.clear();
+    catalogPageCache.clear();
   }
   return valid;
 }

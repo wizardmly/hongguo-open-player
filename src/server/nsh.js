@@ -2,7 +2,9 @@
 // NSH's native video view consumes the same playback engine through an owned
 // loopback process. The URL capability stays inside this application instance.
 const express = require('express');
+const fs = require('node:fs/promises');
 const http = require('node:http');
+const path = require('node:path');
 const { randomBytes } = require('node:crypto');
 const drama = require('./services/dramaService');
 const streams = require('./services/streamService');
@@ -11,15 +13,112 @@ const { shutdownPlaybackSigner } = require('./native/playback-signer');
 const { fetchDanmaku } = require('./native/danmaku');
 const logger = require('./services/logger');
 
+const MAX_DISK_CACHE_BYTES = 600 * 1024 * 1024;
+
 function createNshBackend() {
   const encoderArgs = ['-maxrate', '3M', '-bufsize', '6M'];
   streams.transcode = (buffer, key, signal) => transcodeBytevc2(buffer, key, signal, { encoderArgs });
+  const diskCacheDir = process.env.HONGGUO_DATA_DIR
+    ? path.join(process.env.HONGGUO_DATA_DIR, 'media-cache')
+    : null;
+  // When disk cache is enabled (600 MB LRU), Windows plays local `filePath` directly from disk,
+  // so keep Node's in-memory `streams.cache` minimal instead of pinning 384 MB in RAM.
+  streams.maxCacheBytes = diskCacheDir
+    ? (process.platform === 'win32' ? 24 * 1024 * 1024 : 64 * 1024 * 1024)
+    : 256 * 1024 * 1024;
+  streams.maxCacheCount = diskCacheDir ? (process.platform === 'win32' ? 1 : 4) : 24;
   const app = express();
   const token = randomBytes(32).toString('hex');
   const preparing = new Map();
   const compatibleBuffers = new WeakSet();
   const active = new Set();
   let useHardware = process.platform === 'win32';
+  let diskPruneRunning = false;
+
+  async function statDiskCache(vid) {
+    if (!diskCacheDir) return null;
+    const file = path.join(diskCacheDir, `${vid}.mp4`);
+    try {
+      const st = await fs.stat(file);
+      if (st.size < 1024) return null;
+      const now = new Date();
+      void fs.utimes(file, now, now).catch(() => {});
+      return { sizeBytes: st.size, filePath: file };
+    } catch {
+      return null;
+    }
+  }
+
+  async function readDiskCache(vid) {
+    if (!diskCacheDir) return null;
+    const file = path.join(diskCacheDir, `${vid}.mp4`);
+    try {
+      const buf = await fs.readFile(file);
+      if (buf.length < 1024) return null;
+      const now = new Date();
+      void fs.utimes(file, now, now).catch(() => {});
+      return { buffer: buf, sizeBytes: buf.length, filePath: file };
+    } catch {
+      return null;
+    }
+  }
+
+  async function resolveDiskCachePath(vid, buffer) {
+    if (!diskCacheDir) return null;
+    const file = path.join(diskCacheDir, `${vid}.mp4`);
+    try {
+      const st = await fs.stat(file);
+      if (st.size >= 1024) return file;
+    } catch {
+      // Missing on disk — write it now
+    }
+    return writeDiskCache(vid, buffer);
+  }
+
+  async function writeDiskCache(vid, buffer) {
+    if (!diskCacheDir || !buffer?.length) return null;
+    try {
+      await fs.mkdir(diskCacheDir, { recursive: true });
+      const tmp = path.join(diskCacheDir, `${vid}.${process.pid}.${Date.now()}.tmp`);
+      const target = path.join(diskCacheDir, `${vid}.mp4`);
+      await fs.writeFile(tmp, buffer, { mode: 0o600 });
+      await fs.rename(tmp, target);
+      if (!diskPruneRunning) {
+        diskPruneRunning = true;
+        setImmediate(async () => {
+          try {
+            const names = await fs.readdir(diskCacheDir);
+            const entries = [];
+            let total = 0;
+            for (const name of names) {
+              if (!name.endsWith('.mp4')) continue;
+              const full = path.join(diskCacheDir, name);
+              const st = await fs.stat(full).catch(() => null);
+              if (st) {
+                total += st.size;
+                entries.push({ full, size: st.size, mtimeMs: st.mtimeMs });
+              }
+            }
+            if (total > MAX_DISK_CACHE_BYTES) {
+              entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+              for (const entry of entries) {
+                if (total <= MAX_DISK_CACHE_BYTES) break;
+                await fs.rm(entry.full, { force: true });
+                total -= entry.size;
+              }
+            }
+          } catch {
+            // Ignore disk cache prune errors
+          } finally {
+            diskPruneRunning = false;
+          }
+        });
+      }
+      return target;
+    } catch {
+      return null;
+    }
+  }
 
   async function convertHevc(buffer, signal) {
     const started = Date.now();
@@ -72,19 +171,58 @@ function createNshBackend() {
   });
   router.get('/danmaku/:seriesId/:vid', async (req, res) => res.json(await fetchDanmaku({ seriesId: req.params.seriesId, vid: req.params.vid })));
 
-  async function prepare(vid, signal) {
+  async function prepare(vid, signal, background = false, { needBuffer = true } = {}) {
     if (!/^\d{1,30}$/.test(vid)) throw Object.assign(new Error('分集编号无效'), { status: 400 });
     signal.throwIfAborted();
     const key = `${vid}:auto`;
-    const existingBuffer = streams.cache.get(key)?.buffer;
-    if (existingBuffer && compatibleBuffers.has(existingBuffer)) return existingBuffer;
+    const existingEntry = streams.cache.get(key);
+    if (existingEntry?.buffer && compatibleBuffers.has(existingEntry.buffer)) {
+      streams.cache.delete(key);
+      streams.cache.set(key, existingEntry);
+      const filePath = await resolveDiskCachePath(vid, existingEntry.buffer);
+      return { buffer: existingEntry.buffer, sizeBytes: existingEntry.buffer.length, filePath };
+    }
+
+    // Fast disk-cache hit: `POST /prepare` only needs `stat` + `filePath` (0 bytes read into Node RAM!),
+    // while `GET /media` loads into `streams.cache` on demand for HTTP range streaming.
+    if (!needBuffer) {
+      const diskStat = await statDiskCache(vid);
+      if (diskStat) {
+        signal.throwIfAborted();
+        return { buffer: null, sizeBytes: diskStat.sizeBytes, filePath: diskStat.filePath };
+      }
+    } else {
+      const diskHit = await readDiskCache(vid);
+      if (diskHit) {
+        signal.throwIfAborted();
+        compatibleBuffers.add(diskHit.buffer);
+        streams.cache.delete(key);
+        streams.cache.set(key, { buffer: diskHit.buffer, size: diskHit.buffer.length });
+        streams.pruneCache();
+        return diskHit;
+      }
+    }
+
+    // Foreground playback preempts any unrelated background prefetch holding bandwidth or NVENC
+    if (!background) {
+      for (const [otherVid, otherJob] of preparing.entries()) {
+        if (otherVid !== vid && otherJob.background) {
+          otherJob.controller.abort(new Error('Prefetch superseded'));
+        }
+      }
+    }
+
     let job = preparing.get(vid);
     if (job?.controller.signal.aborted) job = null;
+    if (job && !background) job.background = false;
     if (!job) {
       const controller = new AbortController();
-      job = { controller, waiters: 0 };
+      job = { controller, waiters: 0, background };
       job.promise = (async () => {
-        let buffer = await streams.getDecryptedBuffer(vid, 'auto', { signal: controller.signal });
+        let buffer = await streams.getDecryptedBuffer(vid, 'auto', {
+          signal: controller.signal,
+          background: job.background,
+        });
         // Media Foundation does not include HEVC on every Windows install.
         // The existing FFmpeg path accepts clear MP4 as well as ByteVC2.
         if (buffer.includes(Buffer.from('hvc1')) || buffer.includes(Buffer.from('hev1'))) {
@@ -94,11 +232,20 @@ function createNshBackend() {
             if (!controller.signal.aborted) error.message = '本集视频转换失败，请重试本集';
             throw error;
           }
+          streams.cache.delete(key);
           streams.cache.set(key, { buffer, size: buffer.length });
           streams.pruneCache();
         }
         compatibleBuffers.add(buffer);
-        return buffer;
+        const filePath = await writeDiskCache(vid, buffer);
+        const sizeBytes = buffer.length;
+        if (filePath && process.platform === 'win32' && job.background) {
+          // Background preloads on Windows are played directly via `filePath`; release Node RAM immediately.
+          streams.cache.delete(key);
+        } else {
+          streams.pruneCache();
+        }
+        return { buffer, sizeBytes, filePath };
       })().finally(() => { if (preparing.get(vid) === job) preparing.delete(vid); });
       preparing.set(vid, job);
     }
@@ -125,13 +272,17 @@ function createNshBackend() {
   router.post('/prepare/:vid', async (req, res) => {
     if (req.body?.refresh === true) {
       streams.cache.delete(`${req.params.vid}:auto`);
+      if (diskCacheDir && /^\d{1,30}$/.test(req.params.vid)) {
+        await fs.rm(path.join(diskCacheDir, `${req.params.vid}.mp4`), { force: true }).catch(() => {});
+      }
       require('./native/app-source').clearEntryCache(req.params.vid);
     }
-    const buffer = await prepare(req.params.vid, requestSignal(req, res));
-    res.json({ sizeBytes: buffer.length, path: `/media/${req.params.vid}` });
+    const isBackground = req.body?.background === true;
+    const { sizeBytes, filePath } = await prepare(req.params.vid, requestSignal(req, res), isBackground, { needBuffer: false });
+    res.json({ sizeBytes, path: `/media/${req.params.vid}`, filePath });
   });
   router.get('/media/:vid', async (req, res) => {
-    await prepare(req.params.vid, requestSignal(req, res));
+    await prepare(req.params.vid, requestSignal(req, res), false, { needBuffer: true });
     return streams.handleBufferedStream(req, res, req.params.vid);
   });
   app.use(`/${token}`, router);

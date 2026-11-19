@@ -71,8 +71,8 @@ export function UiTab(props: UiTabProps) {
       disabled={props.disabled}
       accessibilityLabel={props.label}
       onPress={props.onPress}
-      class={`group flex-row items-center justify-center gap-1.5 ${
-        props.pill ? "rounded-full px-2.5 py-1.5" : "rounded-md px-2.5 py-1.5"
+      class={`group shrink-0 flex-row items-center justify-center gap-1.5 ${
+        props.pill ? "rounded-full px-2 py-1" : "rounded-md px-2.5 py-1.5"
       } transition duration-150 hover:bg-accent/55 active:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-40 ${props.class ?? ""}`}
     >
       <If when={props.icon}>

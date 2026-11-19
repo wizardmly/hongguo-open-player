@@ -1,4 +1,4 @@
-import { cleanup, createAnimatedValue, Easing, effect, signal, Text, View } from "nsh";
+import { cleanup, createAnimatedValue, Easing, effect, signal, Text, untracked, View } from "nsh";
 import type { DanmakuComment, DanmakuSpeed } from "../domain/types";
 
 interface ScheduledItem {
@@ -12,9 +12,15 @@ interface ActiveBullet {
   row: number;
   text: string;
   likes: number;
-  colorClass: string;
+  rgb: readonly [number, number, number];
   x: ReturnType<typeof createAnimatedValue>;
+  endX: number;
+  lastX: number;
+  pxPerMs: number;
+  moving: boolean;
 }
+
+const MAX_ACTIVE_BULLETS = 24;
 
 const SPEED_SECONDS: Record<DanmakuSpeed, number> = {
   fast: 10,
@@ -41,13 +47,19 @@ function calculateRequiredGap(wPrev: number, wNext: number, screenWidth: number,
   return Math.max(gapPrev, gapNext);
 }
 
-/** Exact likes-tier color class matching `danmakuColor(item)` in `hongguo-open-player`. */
-function danmakuColorClass(likes: number): string {
-  if (likes >= 500) return "text-danmaku-top";
-  if (likes >= 100) return "text-danmaku-high";
-  if (likes >= 20) return "text-danmaku-mid";
-  if (likes >= 1) return "text-danmaku-low";
-  return "text-danmaku-base";
+/** Exact likes-tier RGB tuple matching `theme.json` danmaku colors (`#ff7777` / `#ffad72` / `#ffd87a` / `#a8dcff` / `#ffffff`). */
+function danmakuRgb(likes: number): readonly [number, number, number] {
+  if (likes >= 500) return [255, 119, 119];
+  if (likes >= 100) return [255, 173, 114];
+  if (likes >= 20) return [255, 216, 122];
+  if (likes >= 1) return [168, 220, 255];
+  return [255, 255, 255];
+}
+
+function rgbaString(rgb: readonly [number, number, number], alpha: number): string {
+  const safe = Number.isFinite(alpha) ? alpha : 1;
+  const clamped = Math.round(Math.min(1, Math.max(0.05, safe)) * 100) / 100;
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${clamped})`;
 }
 
 /**
@@ -170,45 +182,108 @@ export function DanmakuOverlay(props: DanmakuOverlayProps) {
   const bullets = signal<ActiveBullet[]>([]);
   const emittedIds = new Set<string>();
   let scheduled: ScheduledItem[] = [];
+  let nextCursor = 0;
   let lastTime = -1;
   let seq = 1;
 
+  const stopAndClearBullets = () => {
+    const active = untracked(() => bullets());
+    for (const b of active) {
+      b.moving = false;
+      void b.x.stop();
+    }
+    if (active.length > 0) {
+      bullets.set([]);
+    }
+  };
+
+  const driveBullet = (bullet: ActiveBullet) => {
+    const remainingDist = Math.max(0, bullet.lastX - bullet.endX);
+    if (remainingDist <= 1) {
+      bullets.update((prev) => prev.filter((b) => b.key !== bullet.key));
+      return;
+    }
+    const remainingMs = Math.max(80, Math.round(remainingDist / Math.max(0.01, bullet.pxPerMs)));
+    bullet.moving = true;
+    void bullet.x.timing(bullet.endX, { duration: remainingMs, easing: Easing.linear }).then(({ finished }) => {
+      if (finished) {
+        bullets.update((prev) => prev.filter((b) => b.key !== bullet.key));
+      }
+    });
+  };
+
   effect(() => {
+    const bucketedWidth = Math.round(Math.max(320, props.stageWidth) / 160) * 160;
     scheduled = scheduleDanmakuTracks(
       props.comments,
       props.rows,
       props.speed,
-      props.stageWidth,
+      bucketedWidth,
       props.likesPriority,
     );
     emittedIds.clear();
-    bullets.set([]);
+    nextCursor = 0;
+    stopAndClearBullets();
     lastTime = -1;
+  });
+
+  // Freeze visible danmaku in place while paused/buffering, and resume smoothly on play!
+  effect(() => {
+    const playing = props.enabled && props.isPlaying;
+    const currentBullets = untracked(() => bullets());
+    if (!playing) {
+      for (const b of currentBullets) {
+        if (!b.moving) continue;
+        b.moving = false;
+        void b.x.stop().then(({ value }) => {
+          b.lastX = value;
+        });
+      }
+      return;
+    }
+    for (const b of currentBullets) {
+      if (!b.moving) {
+        driveBullet(b);
+      }
+    }
   });
 
   effect(() => {
     if (!props.enabled) {
-      bullets.set([]);
+      stopAndClearBullets();
       return;
     }
     const t = props.currentTime;
     if (t + 0.4 < lastTime) {
       emittedIds.clear();
-      bullets.set([]);
+      nextCursor = 0;
+      stopAndClearBullets();
     }
     lastTime = t;
     if (!props.isPlaying) return;
 
-    const due = scheduled.filter(
-      (item) =>
-        !emittedIds.has(item.raw.id) &&
-        item.raw.time_sec <= t + 0.25 &&
-        item.raw.time_sec >= Math.max(0, t - 0.9),
-    );
-    if (due.length === 0) return;
+    const minTime = Math.max(0, t - 0.9);
+    const maxTime = t + 0.25;
+    while (nextCursor < scheduled.length && scheduled[nextCursor].raw.time_sec < minTime) {
+      nextCursor++;
+    }
 
-    const width = Math.max(320, props.stageWidth);
+    let due: ScheduledItem[] | null = null;
+    let scan = nextCursor;
+    while (scan < scheduled.length && scheduled[scan].raw.time_sec <= maxTime) {
+      const item = scheduled[scan];
+      scan++;
+      if (!emittedIds.has(item.raw.id)) {
+        if (!due) due = [];
+        due.push(item);
+      }
+    }
+    nextCursor = scan;
+    if (!due) return;
+
+    const width = Math.max(320, untracked(() => props.stageWidth));
     const durationMs = Math.round(SPEED_SECONDS[props.speed] * 1000);
+    const added: ActiveBullet[] = [];
 
     for (const entry of due) {
       emittedIds.add(entry.raw.id);
@@ -217,31 +292,55 @@ export function DanmakuOverlay(props: DanmakuOverlayProps) {
       const x = createAnimatedValue(startX);
       const key = `${entry.raw.id}-${seq++}`;
       const likes = Math.max(0, Math.floor(entry.raw.likes || 0));
+      const pxPerMs = (startX - endX) / Math.max(100, durationMs);
 
-      const bullet: ActiveBullet = {
+      added.push({
         key,
         row: entry.row,
         text: entry.raw.text,
         likes,
-        colorClass: danmakuColorClass(likes),
+        rgb: danmakuRgb(likes),
         x,
-      };
-
-      bullets.update((prev) => [...prev.slice(-24), bullet]);
-      void x.timing(endX, { duration: durationMs, easing: Easing.linear }).then(() => {
-        bullets.update((prev) => prev.filter((b) => b.key !== key));
+        endX,
+        lastX: startX,
+        pxPerMs,
+        moving: false,
       });
+    }
+
+    let survivingAdded: ActiveBullet[] = added;
+    bullets.update((prev) => {
+      const combined = prev.length > 0 ? [...prev, ...added] : added;
+      if (combined.length <= MAX_ACTIVE_BULLETS) {
+        return combined;
+      }
+      const cut = combined.length - MAX_ACTIVE_BULLETS;
+      const evicted = combined.slice(0, cut);
+      const kept = combined.slice(cut);
+      for (const old of evicted) {
+        old.moving = false;
+        void old.x.stop();
+      }
+      const keptSet = new Set(kept);
+      survivingAdded = added.filter((b) => keptSet.has(b));
+      return kept;
+    });
+
+    for (const bullet of survivingAdded) {
+      driveBullet(bullet);
     }
   });
 
   cleanup(() => {
-    bullets.set([]);
+    stopAndClearBullets();
   });
+
+  const shadowColor = () => rgbaString([0, 0, 0], Math.min(0.92, props.opacity * 0.95));
 
   return (
     <If when={props.enabled}>
       <View
-        style={{ opacity: props.opacity, height: props.rows * 32, pointerEvents: "none" }}
+        style={{ height: props.rows * 32, pointerEvents: "none" }}
         class="pointer-events-none absolute inset-x-0 top-10 overflow-hidden"
       >
         <Each of={bullets()} key={(b) => b.key}>
@@ -251,24 +350,28 @@ export function DanmakuOverlay(props: DanmakuOverlayProps) {
                 top: b().row * 32,
                 transform: [{ translateX: b().x }],
               }}
-              class="absolute left-0"
+              class="absolute left-0 flex-row items-start"
             >
-              {/* Dark shadow layer (`text-shadow: 0 1px 2px #000, 1px 1px 3px #000`) */}
-              <View style={{ top: 1.5, left: 1.5 }} class="absolute flex-row items-start">
-                <Text class="text-[19px] font-semibold leading-[30px] text-stage">{b().text}</Text>
-                <If when={b().likes > 0}>
-                  <Text class="ml-0.5 text-[11px] font-semibold leading-4 text-stage">{`+${b().likes}`}</Text>
-                </If>
-              </View>
-              {/* Foreground colored danmaku text + superscript `+likes` */}
-              <View class="relative flex-row items-start">
-                <Text class={`text-[19px] font-semibold leading-[30px] ${b().colorClass}`}>{b().text}</Text>
-                <If when={b().likes > 0}>
-                  <Text class={`ml-0.5 text-[11px] font-semibold leading-4 ${b().colorClass}`}>
-                    {`+${b().likes}`}
-                  </Text>
-                </If>
-              </View>
+              <Text
+                style={{
+                  color: rgbaString(b().rgb, props.opacity),
+                  textShadow: [{ x: 1, y: 1, blur: 0, color: shadowColor() }],
+                }}
+                class="text-[19px] font-semibold leading-[30px]"
+              >
+                {b().text}
+              </Text>
+              <If when={b().likes > 0}>
+                <Text
+                  style={{
+                    color: rgbaString(b().rgb, props.opacity),
+                    textShadow: [{ x: 1, y: 1, blur: 0, color: shadowColor() }],
+                  }}
+                  class="ml-0.5 text-[11px] font-semibold leading-4"
+                >
+                  {`+${b().likes}`}
+                </Text>
+              </If>
             </View>
           )}
         </Each>

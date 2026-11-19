@@ -1,20 +1,25 @@
 import { platform, Scroll, Text, View, windowSize } from "nsh";
 import { DramaCard } from "../components/DramaCard";
-import type { CatalogTab, SeriesSummary } from "../domain/types";
+import type { CatalogTab, SeriesSummary, WatchHistoryEntry } from "../domain/types";
 import { HOT_SEARCH_TAGS } from "../services/catalog";
 import { getSeriesProgress } from "../services/store";
-import { UiButton, UiEmptyState, UiSkeleton } from "../ui";
+import { UiBadge, UiButton, UiEmptyState, UiIconButton, UiSkeleton } from "../ui";
 
 export interface CatalogViewProps {
   currentTab: CatalogTab;
   activeQuery: string;
   dramas: SeriesSummary[];
+  latestHistory: WatchHistoryEntry | null;
   loading: boolean;
   error: string | null;
   page: number;
   hasMore: boolean;
   onQuickSearch: (tag: string) => void;
   onSelectDrama: (drama: SeriesSummary) => void;
+  onResumeLatest: (entry: WatchHistoryEntry) => void;
+  onRemoveHistoryItem?: (seriesId: string) => void;
+  onClearHistory?: () => void;
+  onRefresh: () => void;
   onRetry: () => void;
   onChangePage: (delta: -1 | 1) => void;
 }
@@ -26,6 +31,12 @@ function splitIntoRows<T>(items: T[], cols: number): T[][] {
     rows.push(items.slice(i, i + safeCols));
   }
   return rows;
+}
+
+function formatResumeTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 1) return "";
+  const total = Math.floor(seconds);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
 /** Main catalog, search results, watch history, and favorites 5-column poster grid replicating `.catalog-container`. */
@@ -72,22 +83,79 @@ export function CatalogView(props: CatalogViewProps) {
   return (
     <Scroll class="flex-1" keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled">
       <View class={`gap-5 py-4 pb-12 ${outerPad()}`}>
-        {/* Quick Search Chips Bar (`.chips-bar`) */}
+        {/* Quick Search Chips Bar + Refresh & 1-Click Continue Watching */}
         <If when={showHotChips()}>
-          <View class="flex-row flex-wrap items-center gap-2.5 pt-0.5">
-            <Text class="text-[13px] text-dim">热门搜索：</Text>
-            <Each of={HOT_SEARCH_TAGS} key={(t) => t}>
-              {(tag) => (
+          <View class="flex-row flex-wrap items-center justify-between gap-2.5 pt-0.5">
+            <View class="flex-row flex-wrap items-center gap-2">
+              <Text class="text-[13px] text-dim">热门搜索：</Text>
+              <Each of={HOT_SEARCH_TAGS} key={(t) => t}>
+                {(tag) => (
+                  <UiButton
+                    testID={`hot-chip-${tag()}`}
+                    variant="chip"
+                    size="sm"
+                    selected={props.currentTab === "search" && props.activeQuery === tag()}
+                    label={tag()}
+                    onPress={() => props.onQuickSearch(tag())}
+                  />
+                )}
+              </Each>
+            </View>
+
+            <View class="flex-row items-center gap-2">
+              <If when={props.currentTab === "hot-drama" && props.page === 1 ? props.latestHistory : null}>
+                {(last) => {
+                  const posLabel = () => formatResumeTime(last().position_sec);
+                  return (
+                    <UiButton
+                      testID="quick-continue-watching-btn"
+                      variant="seasonPill"
+                      size="sm"
+                      icon="play"
+                      label={`继续看《${
+                        last().series_title.length > 10
+                          ? `${last().series_title.slice(0, 10)}…`
+                          : last().series_title
+                      }》第 ${last().episode_index} 集${posLabel() ? ` ${posLabel()}` : ""}`}
+                      tooltip={`上次观看：${last().series_title} 第 ${last().episode_index} 集`}
+                      onPress={() => props.onResumeLatest(last())}
+                    />
+                  );
+                }}
+              </If>
+              <UiIconButton
+                testID="catalog-refresh-btn"
+                icon="refresh"
+                variant="outline"
+                size="sm"
+                disabled={props.loading}
+                accessibilityLabel="刷新当前列表"
+                tooltip="刷新当前列表"
+                onPress={props.onRefresh}
+                class="bg-surface"
+              />
+            </View>
+          </View>
+        </If>
+
+        {/* History Management Header */}
+        <If when={props.currentTab === "history" && props.dramas.length > 0}>
+          <View class="flex-row items-center justify-between">
+            <View class="flex-row items-center gap-2">
+              <Text class="text-sm font-semibold text-foreground">最近观看记录</Text>
+              <UiBadge label={`共 ${props.dramas.length} 部`} tone="neutral" pill />
+            </View>
+            <If when={props.onClearHistory}>
+              {(clearFn) => (
                 <UiButton
-                  testID={`hot-chip-${tag()}`}
-                  variant="chip"
+                  testID="clear-watch-history-btn"
+                  variant="outline"
                   size="sm"
-                  selected={props.currentTab === "search" && props.activeQuery === tag()}
-                  label={tag()}
-                  onPress={() => props.onQuickSearch(tag())}
+                  label="清空观看记录"
+                  onPress={clearFn()}
                 />
               )}
-            </Each>
+            </If>
           </View>
         </If>
 
@@ -148,6 +216,9 @@ export function CatalogView(props: CatalogViewProps) {
                                 watchedIndex={drama().watched_index ?? progress()?.episode_index}
                                 index={rIdx() * columns() + cIdx()}
                                 onSelect={props.onSelectDrama}
+                                onRemove={
+                                  props.currentTab === "history" ? props.onRemoveHistoryItem : undefined
+                                }
                               />
                             );
                           }}

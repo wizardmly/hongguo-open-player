@@ -22,9 +22,34 @@ liveTest("Windows native playback uses the real Hongguo source and preloads thre
   await app.waitUntil(() => app.texts().some(text => /^00:[1-5][0-9]\s*\//.test(text)), { timeout: 15000 });
   const switched = Date.now();
   await app.press("id:next-episode-btn");
+  await new Promise(resolve => setTimeout(resolve, 15));
+  expect(app.shows("正在缓冲画面...")).toBe(false);
+  await app.screenshot(".nsh/test/switch-1-to-2-15ms.png");
+  await new Promise(resolve => setTimeout(resolve, 65));
+  expect(app.shows("正在缓冲画面...")).toBe(false);
+  await app.screenshot(".nsh/test/switch-1-to-2-80ms.png");
   await app.waitFor("第 2 集 / 全 186 集");
   await app.waitUntil(() => app.texts().some(text => /^00:0[3-9]\s*\//.test(text)), { timeout: 20000 });
   console.log(`NSH_PLAYBACK_TIMING cached_switch_to_three_seconds_ms=${Date.now() - switched}`);
+  await app.screenshot(".nsh/test/hongguo-ep2-frame-a.png");
+  await new Promise(resolve => setTimeout(resolve, 2600));
+  await app.screenshot(".nsh/test/hongguo-ep2-frame-b.png");
+
+  // Bidirectional switch `2 -> 1` (N-1 standby) + cached jump `1 -> 3` (local disk file `Fast Path 2`)
+  await app.press("id:prev-episode-btn");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(app.shows("正在缓冲画面...")).toBe(false);
+  await app.screenshot(".nsh/test/switch-2-to-1-20ms.png");
+  await app.waitFor("第 1 集 / 全 186 集");
+  await app.waitUntil(() => app.texts().some(text => /^00:0[1-9]\s*\//.test(text)), { timeout: 10000 });
+
+  await app.press("id:ep-btn-3");
+  await new Promise(resolve => setTimeout(resolve, 40));
+  expect(app.shows("正在缓冲画面...")).toBe(false);
+  await app.screenshot(".nsh/test/switch-1-to-3-40ms.png");
+  await app.waitFor("第 3 集 / 全 186 集");
+  await app.waitUntil(() => app.texts().some(text => /^00:0[1-9]\s*\//.test(text)), { timeout: 10000 });
+
   await app.press("id:open-seasons-modal-btn");
   await app.waitFor("共 9 季 · 已排好序", { timeout: 30000 });
   expect(app.shows("共 186 集")).toBe(true);

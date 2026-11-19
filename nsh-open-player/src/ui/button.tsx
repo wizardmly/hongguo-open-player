@@ -21,25 +21,25 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   primary:
     "bg-primary hover:bg-primary/90 active:bg-primary/80 selected:bg-primary",
   secondary:
-    "bg-card border border-border hover:bg-accent active:bg-accent/85 selected:bg-primary selected:border-primary",
+    "bg-card border border-border hover:bg-accent active:bg-accent/85 selected:bg-primary selected:border-primary selected:hover:bg-primary/90",
   outline:
-    "bg-transparent border border-border hover:bg-accent/60 active:bg-accent selected:border-primary selected:bg-primary/15",
+    "bg-transparent border border-border hover:bg-accent/60 active:bg-accent selected:border-primary selected:bg-primary/15 selected:hover:bg-primary/20",
   ghost:
     "bg-transparent hover:bg-accent/65 active:bg-accent selected:bg-accent",
   danger:
     "bg-destructive/15 border border-destructive/40 hover:bg-destructive/25 active:bg-destructive/35",
   stage:
-    "bg-transparent border border-border hover:bg-stage-foreground/8 hover:border-muted-foreground active:bg-stage-foreground/15 selected:border-primary selected:bg-primary/12",
+    "bg-transparent border border-border hover:bg-stage-foreground/8 hover:border-muted-foreground active:bg-stage-foreground/15 selected:border-primary selected:bg-primary/12 selected:hover:bg-primary/18",
   stageGhost:
     "bg-transparent hover:bg-stage-foreground/10 active:bg-stage-foreground/18",
   chip:
-    "rounded-full bg-surface border border-border hover:border-primary hover:bg-primary/10 selected:bg-primary selected:border-primary",
+    "rounded-full bg-surface border border-border hover:border-primary hover:bg-primary/10 selected:bg-primary selected:border-primary selected:hover:bg-primary/90",
   seasonPill:
     "rounded-full bg-primary/18 border border-primary/45 hover:bg-primary/30 hover:border-primary",
   episode:
-    "bg-card border border-border hover:bg-accent hover:border-dim selected:bg-ep-active selected:border-ep-active-border",
+    "bg-card border border-border hover:bg-accent hover:border-dim selected:bg-ep-active selected:border-ep-active-border selected:hover:bg-ep-active selected:hover:border-ep-active-border",
   group:
-    "rounded-sm bg-card border border-border hover:bg-accent selected:bg-group-active selected:border-group-active-border",
+    "rounded-sm bg-card border border-border hover:bg-accent selected:bg-group-active selected:border-group-active-border selected:hover:bg-group-active selected:hover:border-group-active-border",
 };
 
 const SIZE_CLASSES: Record<ControlSize, string> = {

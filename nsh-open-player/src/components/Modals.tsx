@@ -587,11 +587,13 @@ export function SourceConfigModal(props: SourceConfigModalProps) {
 const SHORTCUT_ROWS: { keys: string; desc: string }[] = [
   { keys: "空格 / K", desc: "播放 / 暂停视频" },
   { keys: "↑ / PageUp", desc: "切换至上一集" },
-  { keys: "↓ / PageDown", desc: "切换至下一集" },
+  { keys: "↓ / PageDown", desc: "切换至下一集（预载命中零等待无感切集）" },
   { keys: "← / →", desc: "快退 / 快进 5 秒" },
-  { keys: "F / 双击画面", desc: "进入 / 退出全屏模式" },
+  { keys: "D", desc: "快速开启 / 关闭弹幕" },
+  { keys: "S", desc: "展开 / 隐藏右侧选集侧栏" },
+  { keys: "F / 双击画面", desc: "进入 / 退出沉浸全屏模式" },
   { keys: "M", desc: "静音 / 恢复声音" },
-  { keys: "Esc", desc: "退出全屏 / 关闭当前弹窗" },
+  { keys: "Esc", desc: "退出全屏 / 关闭弹窗 / 返回列表" },
   { keys: "Ctrl/Cmd + K", desc: "聚焦顶部搜索框" },
 ];
 

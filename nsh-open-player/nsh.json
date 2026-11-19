@@ -1,13 +1,13 @@
 {
   "name": "红果开源播放器",
   "id": "dev.openplayer.hongguo.nsh",
-  "version": "1.0.0",
-  "build": 2,
+  "version": "1.2.3",
+  "build": 7,
   "icon": "assets/app-icon.png",
   "theme": "theme.json",
   "appearance": "dark",
   "locales": ["zh-CN"],
-  "singleInstance": true,
+  "singleInstance": false,
   "capabilities": {
     "network": { "hosts": ["*"] },
     "fs": { "read": ["${pluginDir}", "${dataDir}"], "write": ["${dataDir}"] },
@@ -28,8 +28,9 @@
     }
   ],
   "window": {
-    "title": "红果开源播放器 - Hongguo Open Player",
+    "title": "红果开源播放器",
     "defaultSize": { "width": 1280, "height": 840 },
-    "minSize": { "width": 380, "height": 640 }
+    "minSize": { "width": 960, "height": 640 },
+    "titleBar": { "style": "hidden", "height": 40 }
   }
 }

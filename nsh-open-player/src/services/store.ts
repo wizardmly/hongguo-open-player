@@ -235,3 +235,18 @@ export function toggleFavoriteSeries(series: SeriesSummary): { favorited: boolea
   });
   return { favorited, saved: persistSnapshot() };
 }
+
+export function clearWatchHistory(): Promise<void> {
+  historyMap.set({});
+  return persistSnapshot();
+}
+
+export function removeHistorySeries(seriesId: string): Promise<void> {
+  historyMap.update((map) => {
+    if (!map[seriesId]) return map;
+    const next = { ...map };
+    delete next[seriesId];
+    return next;
+  });
+  return persistSnapshot();
+}
