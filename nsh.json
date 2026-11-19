@@ -1,0 +1,37 @@
+{
+  "name": "红果开源播放器",
+  "id": "dev.openplayer.hongguo.nsh",
+  "version": "2.0.2",
+  "build": 11,
+  "icon": "assets/app-icon.png",
+  "theme": "theme.json",
+  "appearance": "dark",
+  "locales": ["zh-CN"],
+  "singleInstance": false,
+  "capabilities": {
+    "network": { "hosts": ["*"] },
+    "fs": { "read": ["${pluginDir}", "${dataDir}"], "write": ["${dataDir}"] },
+    "process": {
+      "env": ["HONGGUO_LIVE_TEST"],
+      "execute": ["ffmpeg.exe", "ffmpeg", "bvc2-ffmpeg.exe", "bvc2-ffmpeg", "java.exe", "java"]
+    },
+    "audio": true,
+    "statusBar": true,
+    "picker": true,
+    "clipboard": true,
+    "openUrl": { "schemes": ["https", "http"] }
+  },
+  "fileTypes": [
+    {
+      "name": "Video Media",
+      "extensions": ["mp4", "mov", "webm", "json"],
+      "mimeTypes": ["video/mp4", "video/quicktime", "video/webm", "application/json"]
+    }
+  ],
+  "window": {
+    "title": "红果开源播放器",
+    "defaultSize": { "width": 1280, "height": 840 },
+    "minSize": { "width": 960, "height": 640 },
+    "titleBar": { "style": "hidden", "height": 40 }
+  }
+}

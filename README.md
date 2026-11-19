@@ -1,101 +1,116 @@
-<p><img src="src/client/assets/app-icon.png" alt="红果开源播放器：开放圆环与播放键图标" width="96" height="96"></p>
+<p><img src="assets/app-icon.png" alt="红果开源播放器：开放圆环与播放键图标" width="96" height="96"></p>
 
 # 红果开源播放器 (Hongguo Open Player)
 
-[![CI](https://github.com/zfdang/hongguo-open-player/actions/workflows/ci.yml/badge.svg)](https://github.com/zfdang/hongguo-open-player/actions/workflows/ci.yml)
-[![Release](https://github.com/zfdang/hongguo-open-player/actions/workflows/build-release.yml/badge.svg)](https://github.com/zfdang/hongguo-open-player/actions/workflows/build-release.yml)
+[![CI](https://github.com/wizardmly/hongguo-open-player/actions/workflows/ci.yml/badge.svg)](https://github.com/wizardmly/hongguo-open-player/actions/workflows/ci.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
-一款红果短剧跨平台桌面播放客户端（支持 macOS 与 Windows）。无需安装安卓模拟器，内置流媒体解密与本地代理，提供剧目检索、演员与作品浏览、沉浸式观影和本地进度记忆。
+一款完全基于 **[Longbridge Native Shell (NSH)](https://github.com/longbridge/nsh)** 原生跨平台架构构建的红果短剧桌面播放器（`v2.0.0` 起已全面移除 Electron / Vue / Node.js 运行时）。无需安装安卓模拟器，协议签名、Spade-A 密钥派生、MP4 CENC AES-CTR 解密、ByteVC2/HEVC 转码调度、600MB 磁盘缓存与 UI 渲染全部运行于纯 NSH 原生环境。
 
 ---
 
 ## 📸 界面预览
 
-以下截图来自桌面版实际运行界面，剧目、弹幕和榜单内容会随来源更新。
+以下截图展示播放器核心功能，剧目、弹幕和榜单内容会随来源实时更新。
 
 ### 播放、弹幕与剧集/系列季切换
 
-在播放页观看短剧、调整弹幕和播放设置；右侧侧栏不仅支持按分组快速切换剧集，还能一键查看并换季播放同一系列短剧。
+在播放页观看短剧、调整弹幕和播放设置；右侧侧栏支持按分组快速切换剧集，并支持一键查看和换季播放同一系列短剧。
 
 ![短剧播放界面：视频上方显示弹幕，右侧展示剧目介绍、系列全季与分组选集](docs/screenshots/theater-playback.jpg)
 
 ### 系列全季排序选看
 
-针对拥有多季的短剧，系统自动识别并提取基础剧名，将系列所有季目按顺序（第 1 季到末季）严格升序排列展示；支持在侧栏面板或大图卡片弹窗中直接换季播放，告别手动重新搜索。
+针对多季短剧，系统自动识别基础剧名、补查缺失季目并按第 1 季至末季严格升序排列，支持在侧栏或全季弹窗中直接切换。
 
 ![系列全季对话框：多季短剧严格按顺序排好序，清晰展示当前播放季与各季信息，支持点击即播](docs/screenshots/series-seasons.jpg)
 
-### 浏览短剧
+### 浏览短剧与剧星榜
 
-从热门榜单和分类浏览短剧，通过海报、集数和简介挑选想看的内容。
+从热门榜单与分类浏览短剧，检索剧名、演员或题材，进入演员主页查看作品并直达播放。
 
 ![热门短剧目录：顶部提供分类导航和搜索，下面以海报卡片展示短剧](docs/screenshots/catalog-overview.jpg)
-
-### 搜索与最近搜索
-
-搜索剧名、演员或题材；再次点击搜索框时，可直接选择本地保存的最近搜索。
-
-![搜索结果及最近搜索下拉列表](docs/screenshots/search-history.jpg)
-
-### 剧星榜与演员作品
-
-浏览剧星榜和人气变化，筛选演员并进入主页查看参演作品。
-
-![剧星榜：演员筛选和按排名排列的演员卡片](docs/screenshots/actor-ranking.jpg)
 
 ---
 
 ## ✨ 核心特性
 
-* **🚀 免模拟器极速播放**：直接在桌面端原生直连播放，告别笨重的安卓模拟器；
-* **🎬 实时流式解密代理**：内置基于 Spade-A 派生算法的 CENC-MP4 流式解密中间件，动态重写 MP4 容器（消除 `sinf` 还原为 `avc1`/`hvc1`），支持标准 HTTP Range 分片请求与 Seek 拖拽；
-* **🎞️ ByteVC2 播放**：下载加密片源后边转码边播放；跳转到尚未转换的位置时需等待相应片段生成，不支持分片播放时会自动回退到完整转换；
-* **🎞️ 分集选择、系列全季与连续播放**：通过匿名设备协议获取剧目分集，支持上一集、下一集及自动连播；针对多季短剧智能聚合系列各季目并严格升序排序，支持在播放侧栏直接选集、切季，或呼出系列全季弹窗快速换季选看；
-* **📋 剧名一键复制与选看**：剧目详情弹窗支持文本自由高亮复制与一键复制剧名到剪贴板，方便检索分享；
-* **⚡ 按需读取与预加载**：按播放器请求的 Range 范围读取并解密媒体，兼容路径支持并发分块下载；条件允许时预取下一集信息，减少连播等待；
-* **🔎 最近搜索**：搜索框保存最近 10 条搜索，支持再次搜索、单条删除和清空；
-* **💬 弹幕**：观看时可开启弹幕，并调整显示行数、滚动速度和不透明度；
-* **🌟 剧星榜与演员主页**：顶部「剧星榜」入口支持分页浏览演员排名与人气信息；点击演员查看简介、合作演员及参演短剧，作品列表可加载更多，点击作品即可进入播放；
-* **📱 沉浸式影院视效**：智能画幅自适应（横屏 16:9 / 竖屏 9:16 均按最大视口等比铺满），支持一键全屏、双击全屏、铺满模式与选集侧栏收展；
+* **🚀 纯 NSH 原生无 Node 运行时**：自 `v2.0.0` 起彻底告别 Electron 与 Node.js/Express 后端，协议解析、CENC 解密与原生 GPU 视图均由 NSH（QuickJS + LLRT + GPUI / Direct2D / Media Foundation）直接驱动。
+* **🎬 内置 CENC-MP4 AES-CTR 解密与重写**：在 NSH WebCrypto (`AES-CTR`) 中完成分片样本解密，剔除 `sinf`/`senc`/`saio`/`saiz` 并将 `moov` 前置至 `mdat` 之前；配合 `bvc2-ffmpeg` 与 `ffmpeg`（优先 NVENC，自动回退 libx264）将 ByteVC2 / HEVC 转码为兼容 MP4 落盘缓存。
+* **⚡ 后 3 集顺序预加载 + 600MB 磁盘 LRU**：前台切集优先抢占队列并复用进行中的预加载任务，`Fast Path 2` 结合磁盘缓存实现切换零黑屏。
+* **💬 原生防碰撞弹幕**：支持 `AnimatedValue` 驱动的多行防碰撞弹幕（1/3/5 行、快/中/慢速度、不透明度与高赞优先过滤），全屏下自动为顶部状态栏与底部控制栏预留安全边距。
 * **⌨️ 快捷键对齐移动端**：
   * `空格` / `K`：播放 / 暂停
   * `↑` / `PageUp`：上一集
   * `↓` / `PageDown`：下一集
   * `←` / `→`：快退 / 快进 5 秒
+  * `D`：开启 / 关闭弹幕
   * `F` 或 `双击画面`：全屏切换
-* **🕒 本地进度记忆与收藏**：本地持久化保存每部短剧的观看历史、当前集数及精确秒数，支持继续播放与书架收藏；
-* **🖥️ 跨平台原生桌面支持**：同时支持 macOS（Apple Silicon 与 Intel 架构）及 Windows（x64），提供原生安装包及免安装便携版。
 
 ---
 
-## 🍎 macOS 提示“应用已损坏，无法打开”
+## 🗂️ 目录结构
 
-目前 macOS 安装包未使用 Apple 开发者证书签名和公证，系统的安全检查可能阻止其打开，并提示“应用已损坏”。同样的提示也可能由下载损坏或文件被篡改引起。
-
-请先从项目的 [GitHub Releases](https://github.com/zfdang/hongguo-open-player/releases) 重新下载安装包，选择适合自己 Mac 的版本，并将应用拖入“应用程序”文件夹。如果确认应用来自官方发布页面且未被篡改，仍然无法打开，可以打开“终端”并执行：
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/红果开源播放器.app"
+```text
+hongguo-open-player/
+├── App.tsx                       应用入口、路由编排与原生生命周期钩子
+├── App.test.tsx                  领域逻辑、预加载队列与无头 UI 回归测试
+├── Hongguo.test.ts               SM3 / AES-CBC / 协议签名 / Spade / MP4 CENC 单元测试
+├── Live.test.tsx                 Windows 实网播放与零黑屏/画面运动像素校验（HONGGUO_LIVE_TEST=1）
+├── nsh.json                      NSH 应用清单与能力权限声明
+├── theme.json                    明暗双外观语义令牌
+├── DESIGN.md                     设计规范与动效清单
+├── assets/                       应用图标与内置测试样片/海报
+├── scripts/
+│   ├── dev.ps1                   Windows 一键开发启动（注入 FFmpeg 与 JRE 路径）
+│   ├── verify-windows.ps1        Windows 实网端到端与零黑屏校验
+│   ├── package-windows.ps1       Windows 纯 NSH 便携包打包脚本
+│   ├── Launcher.cs               Windows 无 Node 启动器源码
+│   ├── prepare-playback-signer.ps1 准备本地国内 SDK 签名运行时
+│   └── build-bytevc2.sh          构建 ByteVC2 解码器 FFmpeg
+└── src/
+    ├── hongguo/                  纯 NSH 协议、加密解密、签名、搜索、目录与媒体引擎
+    │   ├── api.ts                目录、Web/App 双路检索、剧集详情、演员榜、弹幕
+    │   ├── app-source.ts         App 播放接口解析、Spade 密钥派生与 URL 解密
+    │   ├── argus.ts              Argus / Ladon / Simon 算法与签名头构造
+    │   ├── crypto.ts             SM3、AES-128-CBC、MP4 CENC AES-CTR 解密与 moov 重构
+    │   ├── danmaku-sign.ts       评论区/弹幕协议签名
+    │   ├── device.ts             播放设备注册与持久化凭证管理
+    │   ├── http.ts               重定向校验与安全 HTTP 请求封装
+    │   ├── media-engine.ts       并发下载、大文件合并、ByteVC2/HEVC 转码与磁盘缓存
+    │   └── signer.ts             Windows x64 DomesticSigner 进程生命周期管理与签名队列
+    ├── domain/                   剧集、季目解析纯函数与类型定义
+    ├── services/                 片源适配、顺序预加载器、本地持久化 Store
+    ├── components/               顶栏、海报卡片、弹幕层、设置与详情弹窗
+    ├── pages/                    目录、剧星榜、影院播放页
+    └── ui/                       基础语义 UI 组件库
 ```
 
-这条命令只移除该应用及其内部文件的下载隔离标记，不会关闭整个系统的安全检查。完成后重新打开应用。如果应用安装在其他位置，请将命令中的路径替换为实际路径；也可以输入 `xattr -dr com.apple.quarantine ` 后，将应用拖到终端窗口自动填入路径。如果提示权限不足，可在同一命令前加 `sudo `，并按提示输入 Mac 的登录密码。
+---
 
-移除隔离标记会绕过此应用的部分安全检查，请只对确认可信的文件使用。如果系统明确提示包含恶意软件，或重新下载后仍怀疑文件损坏、被篡改，请勿运行该命令。更多说明请参阅 [Apple 的安全打开应用指南](https://support.apple.com/zh-cn/102445)。
+## 🛠️ 开发与验证
 
-## 🏗️ 架构设计与文档
+安装 [NSH CLI](https://nsh.dev/docs/installation) 后，在仓库根目录执行：
 
-当前实现采用 **Electron 桌面窗口 + Node.js / Express 本地服务 + Vue 界面**，观看历史、收藏和最近搜索以本地 JSON 文件保存。早期方案中的 SwiftUI、AVPlayer 和 SQLite 选型不代表当前实现。
+```powershell
+# 1. 类型与构建静态检查
+nsh check
 
-运行指南、实现记录与早期研究文档位于 `docs/`：
+# 2. 运行离线单元测试与 UI 回归测试
+nsh test Hongguo.test.ts
+nsh test App.test.tsx
 
-* [🚀 快速开始与安装指南](docs/快速开始.md)
-* [🎮 播放器交互设计与键盘焦点](docs/播放器交互设计.md)
-* [📐 产品设计与技术架构（早期方案）](docs/产品设计与技术架构.md)
-* [🔍 参考项目架构解析：hongguo-player](docs/hongguo-player-architecture.md)
-* [🔍 参考项目架构解析：hongguo-drama](docs/hongguo-drama-architecture.md)
-* [🔍 参考项目架构解析：hongguo-downloader（云端交付链路）](docs/hongguo-downloader-architecture.md)
-* [🧪 真机接口验证与方案报告](docs/验证与实现方案.md)
+# 3. 准备 Windows 本地运行依赖并启动原生窗口（需先备好 build/media-ffmpeg、build/bytevc2）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1 -NshCommand nsh
+
+# 4. 运行 Windows 实网播放与切集零黑屏像素级校验
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows.ps1 -NshCommand nsh
+
+# 5. 构建 Windows 免安装便携包（输出至 dist/windows-v2.0.0，零 Node.js 依赖）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -NshCommand nsh
+```
+
+> 本地运行时需在 `build/playback-signer/win32-x64` 准备签名运行时（`scripts/prepare-playback-signer.ps1` 自动校验 SHA256 下载）、`build/media-ffmpeg/x64/ffmpeg.exe` 完整编码版 FFmpeg 以及 `build/bytevc2/x64/ffmpeg.exe`（构建脚本会自动复制为 `bvc2-ffmpeg.exe`）。
 
 ---
 

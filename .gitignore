@@ -1,6 +1,9 @@
-node_modules/
+.nsh/
+target/
 dist/
 dist-electron/
+nsh-open-player/
+node_modules/
 build/bytevc2/
 build/playback-signer/
 build/media-ffmpeg/
